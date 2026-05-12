@@ -1514,10 +1514,11 @@
     "llmTip": "Gets presence status for a specific user by their user ID or UPN (email). Returns availability and activity. Use list-users to find the user ID first."
   },
   {
-    "pathPattern": "/communications/presences",
+    "pathPattern": "/communications/getPresencesByUserId",
     "method": "post",
     "toolName": "get-presences-by-user-id",
     "workScopes": ["Presence.Read.All"],
+    "contentType": "application/json",
     "llmTip": "Gets presence for multiple users in a single call. Body: { ids: ['user-id-1', 'user-id-2', ...] }. Returns array of presence objects. More efficient than calling get-user-presence for each user. Maximum 650 user IDs per request."
   },
   {
