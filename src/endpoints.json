@@ -168,6 +168,13 @@
     "llmTip": "Max 3MB. Body requires @odata.type: {\"@odata.type\": \"#microsoft.graph.fileAttachment\", \"name\": \"file.pdf\", \"contentBytes\": \"<base64>\"}."
   },
   {
+    "pathPattern": "/me/messages/{message-id}/attachments",
+    "method": "post",
+    "toolName": "add-mail-reference-attachment",
+    "scopes": ["Mail.ReadWrite"],
+    "llmTip": "Attaches a OneDrive/SharePoint file by reference (link), not by upload. Body requires @odata.type: { \"@odata.type\": \"#microsoft.graph.referenceAttachment\", \"name\": \"file.pdf\", \"sourceUrl\": \"https://.../file.pdf\", \"providerType\": \"oneDriveBusiness\", \"permission\": \"view\", \"isFolder\": false }. providerType: 'oneDriveBusiness' | 'oneDriveConsumer' | 'dropbox' | 'other'. permission: 'view' | 'edit' | 'anonymousView' | 'anonymousEdit' | 'organizationView' | 'organizationEdit'. Recipients see a clickable link to the source file rather than an attached copy."
+  },
+  {
     "pathPattern": "/me/messages/{message-id}/attachments/createUploadSession",
     "method": "post",
     "toolName": "create-mail-attachment-upload-session",
