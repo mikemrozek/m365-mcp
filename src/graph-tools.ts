@@ -276,6 +276,15 @@ async function executeGraphTool(
       }
     }
 
+    // Defense-in-depth for Bug 2: Graph rejects $top on /delta() endpoints with
+    // HTTP 400. The user-facing schema for -delta tools strips top/$top, so
+    // freshly-connected clients can't send it. But cached/stale clients (and
+    // ad-hoc callers) might still try. Drop it server-side before clamping or
+    // sending, regardless of where it came from.
+    if (tool.alias.endsWith('-delta')) {
+      delete queryParams['$top'];
+    }
+
     clampTopQueryParam(queryParams);
 
     const preferValues: string[] = [];
@@ -397,6 +406,7 @@ async function executeGraphTool(
         const maxPages = 100;
         const maxItems = 10_000;
 
+        let deltaLink: string | undefined = combinedResponse['@odata.deltaLink'];
         while (nextLink && pageCount < maxPages && allItems.length < maxItems) {
           logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
 
@@ -416,6 +426,9 @@ async function executeGraphTool(
               allItems = allItems.concat(nextJsonResponse.value);
             }
             nextLink = nextJsonResponse['@odata.nextLink'];
+            if (nextJsonResponse['@odata.deltaLink']) {
+              deltaLink = nextJsonResponse['@odata.deltaLink'];
+            }
             pageCount++;
           } else {
             break;
@@ -436,6 +449,12 @@ async function executeGraphTool(
           combinedResponse['@odata.count'] = allItems.length;
         }
         delete combinedResponse['@odata.nextLink'];
+        // Carry the @odata.deltaLink from the final page so callers can resume
+        // a delta sync. Without this, fetchAllPages on a /delta endpoint silently
+        // drops the resume token and forces callers to re-list from scratch.
+        if (deltaLink) {
+          combinedResponse['@odata.deltaLink'] = deltaLink;
+        }
 
         response.content[0].text = JSON.stringify(combinedResponse);
 
