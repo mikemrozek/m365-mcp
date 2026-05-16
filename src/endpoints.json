@@ -431,7 +431,7 @@
     "method": "get",
     "toolName": "get-drive-delta",
     "scopes": ["Files.Read"],
-    "llmTip": "Tracks changes to a driveItem and its children over time. Returns a collection of driveItems that have been created, modified, or deleted. Use get-drive-root-item first to get the root driveItem-id, then pass it here. Supports $select and delta tokens for incremental sync via @odata.deltaLink."
+    "llmTip": "Tracks changes to a driveItem and its children over time. Returns a collection of driveItems that have been created, modified, or deleted. Use get-drive-root-item first to get the root driveItem-id, then pass it here. Supports $select and delta tokens for incremental sync via @odata.deltaLink. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages and the final @odata.deltaLink to resume later."
   },
   {
     "pathPattern": "/drives/{drive-id}/root",
@@ -1369,7 +1369,8 @@
     "pathPattern": "/sites/delta()",
     "method": "get",
     "toolName": "get-sharepoint-sites-delta",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "llmTip": "Incremental sync of SharePoint sites the caller can access. First call returns the current set plus @odata.deltaLink; subsequent calls with that link return only added/changed sites. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages and the final @odata.deltaLink to resume later."
   },
   {
     "pathPattern": "/search/query",
@@ -1618,14 +1619,14 @@
     "method": "get",
     "toolName": "list-calendar-events-delta",
     "scopes": ["Calendars.Read"],
-    "llmTip": "Incremental sync of events across the default calendar. First call returns all events plus @odata.deltaLink. Subsequent calls with that link return only additions/updates/removals. Use $select to limit fields. Deltas expire after ~30 days — start over if the server returns 410 Gone. For a time-bounded view with delta semantics, use list-calendar-view-delta instead."
+    "llmTip": "Incremental sync of events across the default calendar. First call returns all events plus @odata.deltaLink. Subsequent calls with that link return only additions/updates/removals. Use $select to limit fields. Deltas expire after ~30 days — start over if the server returns 410 Gone. For a time-bounded view with delta semantics, use list-calendar-view-delta instead. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages."
   },
   {
     "pathPattern": "/me/calendarView/delta()",
     "method": "get",
     "toolName": "list-calendar-view-delta",
     "scopes": ["Calendars.Read"],
-    "llmTip": "Incremental sync of events within a time window. Required query params on first call: startDateTime, endDateTime (ISO 8601). Returns events in the window plus @odata.deltaLink; subsequent calls with that link return only changes. Expands recurring events to individual occurrences (unlike list-calendar-events-delta which returns the series master). Use this for calendar UIs showing a week/month view."
+    "llmTip": "Incremental sync of events within a time window. Required query params on first call: startDateTime, endDateTime (ISO 8601). Returns events in the window plus @odata.deltaLink; subsequent calls with that link return only changes. Expands recurring events to individual occurrences (unlike list-calendar-events-delta which returns the series master). Use this for calendar UIs showing a week/month view. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages."
   },
   {
     "pathPattern": "/groups",
@@ -1737,7 +1738,7 @@
     "method": "get",
     "toolName": "list-mail-folder-messages-delta",
     "scopes": ["Mail.Read"],
-    "llmTip": "Incremental sync of messages within a mail folder. Graph only supports delta scoped to a folder — use mailFolder-id = 'inbox' for the well-known inbox, or another folder id from list-mail-folders. First call returns all messages plus @odata.deltaLink; subsequent calls with that link return only changes (created/updated/deleted). @odata.nextLink paginates within a single delta window. Deltas expire after ~30 days of inactivity — start over if the server returns 410. Prefer this over full re-list for polling."
+    "llmTip": "Incremental sync of messages within a mail folder. Graph only supports delta scoped to a folder — use mailFolder-id = 'inbox' for the well-known inbox, or another folder id from list-mail-folders. First call returns all messages plus @odata.deltaLink; subsequent calls with that link return only changes (created/updated/deleted). @odata.nextLink paginates within a single delta window. Deltas expire after ~30 days of inactivity — start over if the server returns 410. Prefer this over full re-list for polling. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages."
   },
   {
     "pathPattern": "/me/outlook/masterCategories",

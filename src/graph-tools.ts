@@ -548,6 +548,16 @@ export function registerGraphTools(
       }
     }
 
+    // Graph rejects $top on /delta() endpoints (HTTP 400). Page size is controlled
+    // internally by Graph or via the Prefer: odata.maxpagesize header (not exposed
+    // by this server). Strip $top/top from delta tool schemas so the model never
+    // sends it.
+    const isDeltaTool = tool.alias.endsWith('-delta');
+    if (isDeltaTool) {
+      delete paramSchema['top'];
+      delete paramSchema['$top'];
+    }
+
     // Extract path parameters from the path pattern (e.g., :todoTaskListId from /me/todo/lists/:todoTaskListId/tasks)
     // The generated client omits these from tool.parameters, so we add them manually.
     const pathParamMatches = tool.path.matchAll(/:([a-zA-Z]+)/g);
@@ -739,6 +749,207 @@ export function registerGraphTools(
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool parse-teams-url: ${(error as Error).message}`);
+      failedCount++;
+    }
+  }
+
+  // list-conversation-messages and list-drafts are registered as custom tools because
+  // their Graph URLs collide with existing endpoints.json paths
+  // (/me/messages and /me/mailFolders/{id}/messages). The simplified-openapi
+  // generator collapses path+method duplicates into a single operationId, so a
+  // second endpoints.json entry on the same path would never reach the client.
+  // Both delegate to executeGraphTool with a synthetic Endpoint so they inherit
+  // pagination, auth, OData translation, and $top clamping.
+
+  const mailListReadOnlyHints = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: true,
+  };
+
+  if (!enabledToolsRegex || enabledToolsRegex.test('list-conversation-messages')) {
+    try {
+      const conversationMessagesTool = {
+        alias: 'list-conversation-messages',
+        method: 'get' as const,
+        path: '/me/messages',
+        requestFormat: 'json' as const,
+        parameters: [
+          { name: 'filter', type: 'Query' as const, schema: z.string() },
+          { name: 'select', type: 'Query' as const, schema: z.string() },
+          { name: 'orderby', type: 'Query' as const, schema: z.string() },
+          { name: 'top', type: 'Query' as const, schema: z.number() },
+        ],
+        response: z.any(),
+      };
+      const conversationMessagesConfig: EndpointConfig = {
+        pathPattern: '/me/messages',
+        method: 'get',
+        toolName: 'list-conversation-messages',
+        scopes: ['Mail.Read'],
+        workScopes: ['Mail.Read'],
+      };
+
+      server.tool(
+        'list-conversation-messages',
+        'Lists every message in a single email conversation thread by conversationId. ' +
+          "Use this when you have a conversationId (from any message's conversationId field) " +
+          'and want the whole thread — replies, forwards, and the original — regardless of ' +
+          'subject line changes. The conversationId is stable even when subjects drift ' +
+          "(e.g. 'Re: Topic' → 'Fwd: Different subject'). Backed by /me/messages with " +
+          "$filter=conversationId eq '{id}'. Always pass `select` to limit fields " +
+          '(recommended: id,subject,from,toRecipients,receivedDateTime,bodyPreview,conversationId). ' +
+          'Use orderby=receivedDateTime asc for chronological order. Internally adds ' +
+          'the $filter so callers should NOT pass their own filter parameter.',
+        {
+          conversationId: z
+            .string()
+            .describe(
+              "The conversationId to filter by. Read it from any message's conversationId field " +
+                '(get-mail-message, list-mail-messages, etc.).'
+            ),
+          select: z
+            .string()
+            .optional()
+            .describe(
+              'Comma-separated fields to return, e.g. id,subject,from,toRecipients,receivedDateTime,bodyPreview,conversationId. ' +
+                'Always set this to keep responses small.'
+            ),
+          orderby: z
+            .string()
+            .optional()
+            .describe("Sort expression, e.g. 'receivedDateTime asc' or 'receivedDateTime desc'."),
+          top: z
+            .number()
+            .optional()
+            .describe(
+              'Page size (Graph $top). Start small (5–15) so responses fit context; raise only if needed.'
+            ),
+          fetchAllPages: z
+            .boolean()
+            .optional()
+            .describe(
+              'Follow @odata.nextLink and merge up to 100 pages into one response. ' +
+                'Can return enormous payloads — only when the user explicitly needs the whole thread.'
+            ),
+        },
+        {
+          title: 'list-conversation-messages',
+          ...mailListReadOnlyHints,
+        },
+        async (params) => {
+          const conversationId = String(params.conversationId ?? '').trim();
+          if (!conversationId) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'conversationId is required and must be non-empty.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          // Escape single quotes inside the OData string literal by doubling them.
+          const escapedId = conversationId.replace(/'/g, "''");
+          const callParams: Record<string, unknown> = {
+            filter: `conversationId eq '${escapedId}'`,
+          };
+          if (params.select !== undefined) callParams.select = params.select;
+          if (params.orderby !== undefined) callParams.orderby = params.orderby;
+          if (params.top !== undefined) callParams.top = params.top;
+          if (params.fetchAllPages !== undefined) callParams.fetchAllPages = params.fetchAllPages;
+          return executeGraphTool(
+            conversationMessagesTool,
+            conversationMessagesConfig,
+            graphClient,
+            callParams,
+            authManager
+          );
+        }
+      );
+      registeredCount++;
+    } catch (error) {
+      logger.error(
+        `Failed to register tool list-conversation-messages: ${(error as Error).message}`
+      );
+      failedCount++;
+    }
+  }
+
+  if (!enabledToolsRegex || enabledToolsRegex.test('list-drafts')) {
+    try {
+      const draftsTool = {
+        alias: 'list-drafts',
+        method: 'get' as const,
+        path: '/me/mailFolders/drafts/messages',
+        requestFormat: 'json' as const,
+        parameters: [
+          { name: 'select', type: 'Query' as const, schema: z.string() },
+          { name: 'orderby', type: 'Query' as const, schema: z.string() },
+          { name: 'top', type: 'Query' as const, schema: z.number() },
+        ],
+        response: z.any(),
+      };
+      const draftsConfig: EndpointConfig = {
+        pathPattern: '/me/mailFolders/drafts/messages',
+        method: 'get',
+        toolName: 'list-drafts',
+        scopes: ['Mail.Read'],
+        workScopes: ['Mail.Read'],
+      };
+
+      server.tool(
+        'list-drafts',
+        "Lists unsent draft emails from the user's Drafts folder. Backed by " +
+          '/me/mailFolders/drafts/messages (well-known folder name). Useful for auditing ' +
+          'unsent drafts or resuming a draft started earlier. Always pass `select` to keep ' +
+          'responses small (recommended: id,subject,toRecipients,createdDateTime,lastModifiedDateTime,bodyPreview). ' +
+          'Use orderby=lastModifiedDateTime desc to see most recently edited drafts first.',
+        {
+          select: z
+            .string()
+            .optional()
+            .describe(
+              'Comma-separated fields to return, e.g. id,subject,toRecipients,createdDateTime,lastModifiedDateTime,bodyPreview.'
+            ),
+          orderby: z
+            .string()
+            .optional()
+            .describe(
+              "Sort expression, e.g. 'lastModifiedDateTime desc' or 'createdDateTime desc'."
+            ),
+          top: z
+            .number()
+            .optional()
+            .describe(
+              'Page size (Graph $top). Start small (5–15) so responses fit context; raise only if needed.'
+            ),
+          fetchAllPages: z
+            .boolean()
+            .optional()
+            .describe(
+              'Follow @odata.nextLink and merge up to 100 pages into one response. Only use if the user needs every draft.'
+            ),
+        },
+        {
+          title: 'list-drafts',
+          ...mailListReadOnlyHints,
+        },
+        async (params) => {
+          const callParams: Record<string, unknown> = {};
+          if (params.select !== undefined) callParams.select = params.select;
+          if (params.orderby !== undefined) callParams.orderby = params.orderby;
+          if (params.top !== undefined) callParams.top = params.top;
+          if (params.fetchAllPages !== undefined) callParams.fetchAllPages = params.fetchAllPages;
+          return executeGraphTool(draftsTool, draftsConfig, graphClient, callParams, authManager);
+        }
+      );
+      registeredCount++;
+    } catch (error) {
+      logger.error(`Failed to register tool list-drafts: ${(error as Error).message}`);
       failedCount++;
     }
   }
