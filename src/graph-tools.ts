@@ -407,7 +407,22 @@ async function executeGraphTool(
         const maxItems = 10_000;
 
         let deltaLink: string | undefined = combinedResponse['@odata.deltaLink'];
-        while (nextLink && pageCount < maxPages && allItems.length < maxItems) {
+        let bailedOut: 'maxPages' | 'maxItems' | null = null;
+        while (nextLink) {
+          // Check caps BEFORE fetching the next page so the loop exits cleanly
+          // and the last-known nextLink is preserved for caller resume. Previously
+          // the cap check was in the while condition, which combined with the
+          // unconditional `delete @odata.nextLink` below stranded callers mid-sync
+          // (value array returned, but no resume token).
+          if (pageCount >= maxPages) {
+            bailedOut = 'maxPages';
+            break;
+          }
+          if (allItems.length >= maxItems) {
+            bailedOut = 'maxItems';
+            break;
+          }
+
           logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
 
           // Extract path + query string from the nextLink URL.
@@ -435,12 +450,10 @@ async function executeGraphTool(
           }
         }
 
-        if (pageCount >= maxPages) {
-          logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
-        }
-        if (allItems.length >= maxItems) {
+        if (bailedOut) {
           logger.warn(
-            `Reached maximum item limit (${maxItems}) for pagination — truncated at ${allItems.length} items`
+            `fetchAllPages hit cap '${bailedOut}' (pages=${pageCount}/${maxPages}, ` +
+              `items=${allItems.length}/${maxItems}); preserving @odata.nextLink for caller resume.`
           );
         }
 
@@ -448,7 +461,16 @@ async function executeGraphTool(
         if (combinedResponse['@odata.count']) {
           combinedResponse['@odata.count'] = allItems.length;
         }
-        delete combinedResponse['@odata.nextLink'];
+
+        // Only strip @odata.nextLink if the loop exited because Graph stopped
+        // emitting it. If we bailed out due to caps, preserve the last-known
+        // nextLink so the caller can resume.
+        if (bailedOut && nextLink) {
+          combinedResponse['@odata.nextLink'] = nextLink;
+        } else {
+          delete combinedResponse['@odata.nextLink'];
+        }
+
         // Carry the @odata.deltaLink from the final page so callers can resume
         // a delta sync. Without this, fetchAllPages on a /delta endpoint silently
         // drops the resume token and forces callers to re-list from scratch.
@@ -456,10 +478,23 @@ async function executeGraphTool(
           combinedResponse['@odata.deltaLink'] = deltaLink;
         }
 
+        // Diagnostic marker so callers can detect partial results and the reason.
+        if (bailedOut) {
+          combinedResponse['_tsq_pagingBailedOut'] = {
+            reason: bailedOut,
+            pageCount,
+            itemCount: allItems.length,
+            maxPages,
+            maxItems,
+            note: 'Returned partial results due to pagination cap. Use @odata.nextLink to resume.',
+          };
+        }
+
         response.content[0].text = JSON.stringify(combinedResponse);
 
         logger.info(
-          `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
+          `Pagination complete: collected ${allItems.length} items across ${pageCount} pages` +
+            (bailedOut ? ` (bailed out on ${bailedOut})` : '')
         );
       } catch (e) {
         logger.error(`Error during pagination: ${e}`);
