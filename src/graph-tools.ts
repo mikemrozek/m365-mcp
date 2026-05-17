@@ -798,6 +798,8 @@ export function registerGraphTools(
           { name: 'select', type: 'Query' as const, schema: z.string() },
           { name: 'orderby', type: 'Query' as const, schema: z.string() },
           { name: 'top', type: 'Query' as const, schema: z.number() },
+          { name: 'count', type: 'Query' as const, schema: z.boolean() },
+          { name: 'ConsistencyLevel', type: 'Header' as const, schema: z.string() },
         ],
         response: z.any(),
       };
@@ -812,14 +814,17 @@ export function registerGraphTools(
       server.tool(
         'list-conversation-messages',
         'Lists every message in a single email conversation thread by conversationId. ' +
-          "Use this when you have a conversationId (from any message's conversationId field) " +
-          'and want the whole thread — replies, forwards, and the original — regardless of ' +
-          'subject line changes. The conversationId is stable even when subjects drift ' +
-          "(e.g. 'Re: Topic' → 'Fwd: Different subject'). Backed by /me/messages with " +
-          "$filter=conversationId eq '{id}'. Always pass `select` to limit fields " +
+          "The conversationId is stable across subject line changes — get it from any " +
+          "message's conversationId field (get-mail-message, list-mail-messages, etc.). " +
+          "Backed by /me/messages with $filter=conversationId eq '{id}' (the server adds " +
+          'this filter for you, so callers must NOT pass their own filter parameter). ' +
+          'Always pass `select` to limit returned fields ' +
           '(recommended: id,subject,from,toRecipients,receivedDateTime,bodyPreview,conversationId). ' +
-          'Use orderby=receivedDateTime asc for chronological order. Internally adds ' +
-          'the $filter so callers should NOT pass their own filter parameter.',
+          'To sort results, pass count: true alongside orderby. This enables Graph advanced ' +
+          'query mode (sets ConsistencyLevel: eventual and $count=true), which is required ' +
+          "when combining $filter=conversationId eq '...' with $orderby — without it, Graph " +
+          'returns HTTP 400 InefficientFilter. If you cannot use count mode, omit orderby and ' +
+          'sort the returned results client-side.',
         {
           conversationId: z
             .string()
@@ -837,12 +842,24 @@ export function registerGraphTools(
           orderby: z
             .string()
             .optional()
-            .describe("Sort expression, e.g. 'receivedDateTime asc' or 'receivedDateTime desc'."),
+            .describe(
+              "Sort expression, e.g. 'receivedDateTime asc' or 'receivedDateTime desc'. " +
+                'Requires count: true — Graph returns 400 InefficientFilter if orderby is ' +
+                'passed without count: true.'
+            ),
           top: z
             .number()
             .optional()
             .describe(
               'Page size (Graph $top). Start small (5–15) so responses fit context; raise only if needed.'
+            ),
+          count: z
+            .boolean()
+            .optional()
+            .describe(
+              'Set true to enable Graph advanced query mode (ConsistencyLevel: eventual + ' +
+                '$count=true). Required when passing orderby, because Graph cannot satisfy ' +
+                "$filter=conversationId eq '...' + $orderby without advanced query mode."
             ),
           fetchAllPages: z
             .boolean()
@@ -879,6 +896,10 @@ export function registerGraphTools(
           if (params.select !== undefined) callParams.select = params.select;
           if (params.orderby !== undefined) callParams.orderby = params.orderby;
           if (params.top !== undefined) callParams.top = params.top;
+          if (params.count === true) {
+            callParams.count = true;
+            callParams.ConsistencyLevel = 'eventual';
+          }
           if (params.fetchAllPages !== undefined) callParams.fetchAllPages = params.fetchAllPages;
           return executeGraphTool(
             conversationMessagesTool,
