@@ -820,11 +820,14 @@ export function registerGraphTools(
           'this filter for you, so callers must NOT pass their own filter parameter). ' +
           'Always pass `select` to limit returned fields ' +
           '(recommended: id,subject,from,toRecipients,receivedDateTime,bodyPreview,conversationId). ' +
-          'To sort results, pass count: true alongside orderby. This enables Graph advanced ' +
-          'query mode (sets ConsistencyLevel: eventual and $count=true), which is required ' +
-          "when combining $filter=conversationId eq '...' with $orderby — without it, Graph " +
-          'returns HTTP 400 InefficientFilter. If you cannot use count mode, omit orderby and ' +
-          'sort the returned results client-side.',
+          'To sort results, pass `orderby` (e.g. "receivedDateTime asc" or ' +
+          '"receivedDateTime desc"). Microsoft Graph rejects $filter=conversationId + ' +
+          '$orderby even in advanced query mode (InefficientFilter), so the server sorts ' +
+          'the returned page(s) client-side. For correct sort order across long threads, ' +
+          'also pass `fetchAllPages: true` so the full set is sorted, not just the first page. ' +
+          "The `count: true` parameter enables Graph's advanced query mode (ConsistencyLevel: " +
+          'eventual + $count=true). It is NOT required for orderby (the server handles that ' +
+          'client-side) but may be useful when combined with other advanced query features.',
         {
           conversationId: z
             .string()
@@ -844,8 +847,8 @@ export function registerGraphTools(
             .optional()
             .describe(
               "Sort expression, e.g. 'receivedDateTime asc' or 'receivedDateTime desc'. " +
-                'Requires count: true — Graph returns 400 InefficientFilter if orderby is ' +
-                'passed without count: true.'
+                'The server sorts client-side because Graph rejects $filter + $orderby on /me/messages. ' +
+                'For complete sort across long threads, also pass fetchAllPages: true.'
             ),
           top: z
             .number()
@@ -857,9 +860,8 @@ export function registerGraphTools(
             .boolean()
             .optional()
             .describe(
-              'Set true to enable Graph advanced query mode (ConsistencyLevel: eventual + ' +
-                '$count=true). Required when passing orderby, because Graph cannot satisfy ' +
-                "$filter=conversationId eq '...' + $orderby without advanced query mode."
+              'Set true to enable Graph advanced query mode (ConsistencyLevel: eventual + $count=true). ' +
+                'NOT required for orderby (the server sorts client-side). Useful when combining with other advanced query features.'
             ),
           fetchAllPages: z
             .boolean()
@@ -888,26 +890,83 @@ export function registerGraphTools(
               isError: true,
             };
           }
+          // Capture the requested orderby BEFORE we strip it from the outbound call.
+          // Graph rejects $filter=conversationId + $orderby with InefficientFilter even
+          // in advanced query mode, so we sort client-side after fetch.
+          const requestedOrderby = params.orderby;
+
           // Escape single quotes inside the OData string literal by doubling them.
           const escapedId = conversationId.replace(/'/g, "''");
           const callParams: Record<string, unknown> = {
             filter: `conversationId eq '${escapedId}'`,
           };
           if (params.select !== undefined) callParams.select = params.select;
-          if (params.orderby !== undefined) callParams.orderby = params.orderby;
+          // NOTE: deliberately NOT setting orderby on callParams — see comment above.
           if (params.top !== undefined) callParams.top = params.top;
           if (params.count === true) {
             callParams.count = true;
             callParams.ConsistencyLevel = 'eventual';
           }
           if (params.fetchAllPages !== undefined) callParams.fetchAllPages = params.fetchAllPages;
-          return executeGraphTool(
+
+          const result = await executeGraphTool(
             conversationMessagesTool,
             conversationMessagesConfig,
             graphClient,
             callParams,
             authManager
           );
+
+          if (!requestedOrderby) {
+            return result;
+          }
+
+          try {
+            const textBlock = result.content?.[0];
+            if (!textBlock || textBlock.type !== 'text' || typeof textBlock.text !== 'string') {
+              return result;
+            }
+            const parsed = JSON.parse(textBlock.text);
+            if (!parsed || !Array.isArray(parsed.value)) {
+              return result;
+            }
+
+            const orderbyParts = requestedOrderby.trim().split(/\s+/);
+            const field = orderbyParts[0];
+            const direction = (orderbyParts[1] || 'asc').toLowerCase();
+            const ascending = direction !== 'desc';
+
+            parsed.value.sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
+              const aVal = a?.[field];
+              const bVal = b?.[field];
+              if (aVal === undefined || aVal === null) return ascending ? 1 : -1;
+              if (bVal === undefined || bVal === null) return ascending ? -1 : 1;
+              if (aVal < bVal) return ascending ? -1 : 1;
+              if (aVal > bVal) return ascending ? 1 : -1;
+              return 0;
+            });
+
+            parsed._tsq_clientSorted = {
+              field,
+              direction: ascending ? 'asc' : 'desc',
+              note: 'Sorted client-side by the MCP server because Graph rejects this $filter + $orderby combination with InefficientFilter, even in advanced query mode.',
+            };
+
+            return {
+              ...result,
+              content: [
+                {
+                  ...textBlock,
+                  text: JSON.stringify(parsed),
+                },
+              ],
+            };
+          } catch (err) {
+            logger.warn(
+              `Failed to client-side sort list-conversation-messages result: ${(err as Error).message}`
+            );
+            return result;
+          }
         }
       );
       registeredCount++;
