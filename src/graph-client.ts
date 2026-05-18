@@ -200,6 +200,43 @@ class GraphClient {
     return JSON.stringify(data, null, pretty ? 2 : undefined);
   }
 
+  /**
+   * Posts a Graph /$batch request with up to 20 sub-requests. Token resolution,
+   * URL construction, and error handling come from makeRequest. Returns the raw
+   * { responses: [...] } envelope from Graph so callers can correlate sub-responses
+   * back to the original requests by id.
+   */
+  async batchRequest(
+    subRequests: Array<{
+      id: string;
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+      body?: unknown;
+    }>
+  ): Promise<{
+    responses: Array<{
+      id: string;
+      status: number;
+      headers?: Record<string, string>;
+      body: unknown;
+    }>;
+  }> {
+    logger.info(`[GRAPH CLIENT] Batch request with ${subRequests.length} sub-requests`);
+    const result = await this.makeRequest('/$batch', {
+      method: 'POST',
+      body: JSON.stringify({ requests: subRequests }),
+    });
+    return result as {
+      responses: Array<{
+        id: string;
+        status: number;
+        headers?: Record<string, string>;
+        body: unknown;
+      }>;
+    };
+  }
+
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {
     try {
       logger.info(`Calling ${endpoint} with options: ${JSON.stringify(options)}`);

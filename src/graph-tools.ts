@@ -1088,6 +1088,132 @@ export function registerGraphTools(
     }
   }
 
+  if (!enabledToolsRegex || enabledToolsRegex.test('get-messages-batch')) {
+    try {
+      server.tool(
+        'get-messages-batch',
+        'Fetches multiple email messages in a single Graph /$batch request. ' +
+          'Much faster than calling get-mail-message N times when you need ' +
+          'full bodies for several messages (e.g., daily digests, thread ' +
+          'summaries, audit reports). Up to 20 messages per call (Graph $batch limit). ' +
+          'Pass `select` to limit returned fields and keep payloads small ' +
+          '(recommended: id,subject,from,toRecipients,receivedDateTime,bodyPreview,body). ' +
+          'Returns { results, failures, summary }: results[] holds the successful ' +
+          'sub-responses each tagged with their messageId; failures[] holds any ' +
+          'sub-requests Graph returned non-2xx for (e.g. unknown message ID). The ' +
+          'outer call still returns HTTP 200 — Graph processes the batch and ' +
+          'returns partial success.',
+        {
+          messageIds: z
+            .array(z.string())
+            .min(1)
+            .max(20)
+            .describe(
+              'List of message IDs to fetch. Maximum 20 per call (Graph $batch limit). ' +
+                'Get IDs from list-mail-messages, list-conversation-messages, search-query, etc.'
+            ),
+          select: z
+            .string()
+            .optional()
+            .describe(
+              'Comma-separated fields to return for each message. Strongly recommended ' +
+                'to keep responses small. Example: id,subject,from,receivedDateTime,body.'
+            ),
+        },
+        {
+          title: 'get-messages-batch',
+          ...mailListReadOnlyHints,
+        },
+        async (params) => {
+          const messageIds = params.messageIds.filter((id) => typeof id === 'string' && id.trim());
+          if (messageIds.length === 0) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ error: 'messageIds must contain at least one non-empty ID.' }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          if (messageIds.length > 20) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ error: 'messageIds limited to 20 per call (Graph $batch limit).' }),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          // Build the per-message URL. Graph $batch URLs are relative to /v1.0 and
+          // may include a query string. encodeURIComponent escapes '=' in message
+          // IDs to %3D — Graph accepts both forms but unescaping keeps logs readable.
+          const selectClause = params.select
+            ? `?$select=${encodeURIComponent(params.select).replace(/%2C/gi, ',')}`
+            : '';
+          const subRequests = messageIds.map((id, idx) => ({
+            id: String(idx + 1),
+            method: 'GET',
+            url: `/me/messages/${encodeURIComponent(id).replace(/%3D/g, '=')}${selectClause}`,
+          }));
+
+          try {
+            const batchResponse = await graphClient.batchRequest(subRequests);
+
+            const results: Array<{ messageId: string; data: unknown }> = [];
+            const failures: Array<{ messageId: string; status: number; error: unknown }> = [];
+
+            for (const subResp of batchResponse.responses ?? []) {
+              const idx = parseInt(subResp.id, 10) - 1;
+              const messageId = messageIds[idx];
+              if (subResp.status >= 200 && subResp.status < 300) {
+                results.push({ messageId, data: subResp.body });
+              } else {
+                failures.push({ messageId, status: subResp.status, error: subResp.body });
+              }
+            }
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    results,
+                    failures,
+                    summary: {
+                      total: messageIds.length,
+                      succeeded: results.length,
+                      failed: failures.length,
+                    },
+                  }),
+                },
+              ],
+            };
+          } catch (err) {
+            logger.error(`get-messages-batch failed: ${(err as Error).message}`);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ error: (err as Error).message }),
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+      registeredCount++;
+    } catch (error) {
+      logger.error(`Failed to register tool get-messages-batch: ${(error as Error).message}`);
+      failedCount++;
+    }
+  }
+
   // Layer 3 (list-accounts tool) is registered by registerAuthTools in auth-tools.ts.
   // It is the canonical owner of account discovery — no duplicate registration here.
 
