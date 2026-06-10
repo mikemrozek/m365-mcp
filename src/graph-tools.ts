@@ -5,6 +5,7 @@ import AuthManager from './auth.js';
 import { api } from './generated/client.js';
 import { z } from 'zod';
 import { readFileSync } from 'fs';
+import { createHash } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
@@ -1210,6 +1211,219 @@ export function registerGraphTools(
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool get-messages-batch: ${(error as Error).message}`);
+      failedCount++;
+    }
+  }
+
+  // download-mail-attachment writes to OneDrive (staging upload), so it is a
+  // write tool — skip it entirely in read-only mode, mirroring the endpoint
+  // loop's `readOnly && method !== 'GET'` gate above.
+  if (readOnly) {
+    logger.info('Skipping write tool download-mail-attachment - read-only mode');
+    skippedCount++;
+  } else if (!enabledToolsRegex || enabledToolsRegex.test('download-mail-attachment')) {
+    try {
+      // Simple OneDrive upload (PUT .../content) handles a single file up to
+      // 250 MB, which covers every mail attachment (Exchange caps well below
+      // this), so we avoid the complexity of chunked upload sessions.
+      const MAX_ATTACHMENT_BYTES = 250 * 1024 * 1024;
+      server.tool(
+        'download-mail-attachment',
+        'Downloads a mail attachment via OneDrive staging — returns a pre-authed ' +
+          'download URL plus metadata, NOT the file bytes themselves. Use this for ' +
+          'any attachment large enough that returning base64 through get-mail-attachment ' +
+          'would overflow context (realistically anything over ~50KB).\n\n' +
+          'Flow: (1) list-mail-attachments to find the attachmentId; ' +
+          '(2) download-mail-attachment to stage the file to OneDrive and get a URL; ' +
+          '(3) fetch the URL directly (curl/HTTP) to wherever you need the file.\n\n' +
+          'Returns { downloadUrl, name, size, contentType, sha256, expiresInSeconds, stagedDriveItemId }. ' +
+          'The downloadUrl is short-lived (~1 hour) and pre-authenticated — no Authorization ' +
+          'header needed when fetching it. The bytes are NEVER returned through this tool, so ' +
+          'model context is unaffected by attachment size. Only supports fileAttachment; for ' +
+          'itemAttachment or referenceAttachment use get-mail-attachment instead. Verify the ' +
+          'download with the returned sha256.',
+        {
+          messageId: z
+            .string()
+            .min(1)
+            .describe('The ID of the mail message that owns the attachment.'),
+          attachmentId: z
+            .string()
+            .min(1)
+            .describe(
+              'The ID of the attachment to download. Get it from list-mail-attachments.'
+            ),
+          userId: z
+            .string()
+            .optional()
+            .describe(
+              "For shared/other mailboxes: the user id or UPN whose message this is. " +
+                "Omit (or pass 'me') for the signed-in user's own mailbox. The staged " +
+                "copy is always written to the signed-in user's OneDrive."
+            ),
+        },
+        {
+          title: 'download-mail-attachment',
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: true,
+        },
+        async (params) => {
+          const messageId = (params.messageId ?? '').trim();
+          const attachmentId = (params.attachmentId ?? '').trim();
+          if (!messageId || !attachmentId) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'messageId and attachmentId are both required and must be non-empty.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const userId = (params.userId ?? '').trim();
+          const mailBase =
+            userId && userId.toLowerCase() !== 'me'
+              ? `/users/${encodeURIComponent(userId)}`
+              : '/me';
+          const attachmentPath = `${mailBase}/messages/${encodeURIComponent(
+            messageId
+          )}/attachments/${encodeURIComponent(attachmentId)}`;
+
+          try {
+            // 1. Metadata first (no contentBytes — $select keeps it small and
+            //    lets us reject non-file attachments before pulling any bytes).
+            const metadata = (await graphClient.makeRequest(
+              `${attachmentPath}?$select=id,name,contentType,size,isInline`
+            )) as {
+              '@odata.type'?: string;
+              name?: string;
+              contentType?: string;
+              size?: number;
+            };
+
+            const odataType = metadata['@odata.type'];
+            if (odataType && odataType !== '#microsoft.graph.fileAttachment') {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: `download-mail-attachment only supports fileAttachment, but this is ${odataType}. Use get-mail-attachment for itemAttachment, or follow the @odata reference for referenceAttachment.`,
+                    }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+
+            if (typeof metadata.size === 'number' && metadata.size > MAX_ATTACHMENT_BYTES) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: `Attachment is ${metadata.size} bytes, which exceeds the ${MAX_ATTACHMENT_BYTES}-byte (250 MB) staging limit.`,
+                    }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+
+            // 2. Stream the raw bytes from /$value (server-side only — never
+            //    serialized into the tool response).
+            const { buffer, contentType: rawContentType } = await graphClient.fetchBinary(
+              `${attachmentPath}/$value`
+            );
+            if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: `Attachment is ${buffer.byteLength} bytes, which exceeds the ${MAX_ATTACHMENT_BYTES}-byte (250 MB) staging limit.`,
+                    }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+            const contentType =
+              metadata.contentType || rawContentType || 'application/octet-stream';
+
+            // 3. Build a collision-safe staging filename and upload to a marked
+            //    folder under the user's OneDrive root. Using /drive/root (not
+            //    special/approot) because the granted scope is Files.ReadWrite,
+            //    not Files.ReadWrite.AppFolder — approot is the AppFolder construct
+            //    and can 404 under the broad scope. The path auto-creates the folder.
+            const rawName = (metadata.name && String(metadata.name)) || `attachment-${attachmentId}`;
+            const safeName =
+              rawName.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'attachment';
+            const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const stagedName = `${uniquePrefix}-${safeName}`;
+            const uploadPath = `/me/drive/root:/Apps/TSQ-M365-MCP-staging/${encodeURIComponent(
+              stagedName
+            )}:/content`;
+
+            const driveItem = (await graphClient.putBinary(
+              uploadPath,
+              buffer,
+              contentType
+            )) as { id?: string; '@microsoft.graph.downloadUrl'?: string };
+
+            const stagedDriveItemId = driveItem.id;
+            let downloadUrl = driveItem['@microsoft.graph.downloadUrl'];
+
+            // The PUT response often omits the downloadUrl; fetch it explicitly
+            // from the item if so.
+            if (!downloadUrl && stagedDriveItemId) {
+              const fetched = (await graphClient.makeRequest(
+                `/me/drive/items/${encodeURIComponent(stagedDriveItemId)}`
+              )) as { '@microsoft.graph.downloadUrl'?: string };
+              downloadUrl = fetched['@microsoft.graph.downloadUrl'];
+            }
+
+            const sha256 = createHash('sha256').update(buffer).digest('hex');
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    downloadUrl,
+                    name: rawName,
+                    size: buffer.byteLength,
+                    contentType,
+                    sha256,
+                    expiresInSeconds: 3600,
+                    stagedDriveItemId,
+                    note: 'The downloadUrl is pre-authed and short-lived (~1 hour). Fetch it directly via curl/HTTP to download the bytes to your own disk — no Authorization header needed. The bytes are NOT returned through this tool. Verify the download against sha256.',
+                  }),
+                },
+              ],
+            };
+          } catch (err) {
+            logger.error(`download-mail-attachment failed: ${(err as Error).message}`);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ error: (err as Error).message }),
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+      registeredCount++;
+    } catch (error) {
+      logger.error(`Failed to register tool download-mail-attachment: ${(error as Error).message}`);
       failedCount++;
     }
   }

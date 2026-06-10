@@ -237,6 +237,79 @@ class GraphClient {
     };
   }
 
+  /**
+   * Fetches raw bytes from a Graph endpoint (e.g. an attachment's /$value).
+   * Unlike makeRequest, this never base64-encodes or UTF-8-decodes the body —
+   * it returns the Buffer verbatim plus the content type, so callers can
+   * re-stream the bytes (e.g. stage to OneDrive) without a lossy round-trip.
+   */
+  async fetchBinary(
+    endpoint: string,
+    options: GraphRequestOptions = {}
+  ): Promise<{ buffer: Buffer; contentType: string }> {
+    const contextTokens = getRequestTokens();
+    const accessToken =
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    if (!accessToken) {
+      throw new Error('No access token available');
+    }
+    const response = await this.performRequest(endpoint, accessToken, options);
+    if (!response.ok) {
+      throw new Error(
+        `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+      );
+    }
+    const contentType = response.headers?.get?.('content-type') || 'application/octet-stream';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    logger.info(`[GRAPH CLIENT] Fetched ${buffer.byteLength} binary bytes from ${endpoint}`);
+    return { buffer, contentType };
+  }
+
+  /**
+   * Uploads raw bytes to a Graph endpoint via PUT (e.g. a simple OneDrive
+   * upload to .../content, which supports files up to 250 MB in one request).
+   * Sends the Buffer directly with the given content type rather than a JSON
+   * body, and returns the parsed driveItem JSON Graph responds with.
+   */
+  async putBinary(
+    endpoint: string,
+    buffer: Buffer,
+    contentType: string,
+    options: GraphRequestOptions = {}
+  ): Promise<unknown> {
+    const contextTokens = getRequestTokens();
+    const accessToken =
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    if (!accessToken) {
+      throw new Error('No access token available');
+    }
+    const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
+    const url = `${cloudEndpoints.graphApi}/v1.0${endpoint}`;
+    logger.info(`[GRAPH CLIENT] Binary PUT to: ${url} (${buffer.byteLength} bytes)`);
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': contentType || 'application/octet-stream',
+      },
+      // Zero-copy Uint8Array view. The DOM lib's BodyInit type doesn't list
+      // typed arrays under this TS config, but undici's fetch accepts them at
+      // runtime — cast to satisfy the overload.
+      body: new Uint8Array(
+        buffer.buffer,
+        buffer.byteOffset,
+        buffer.byteLength
+      ) as unknown as BodyInit,
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+      );
+    }
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
+  }
+
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {
     try {
       logger.info(`Calling ${endpoint} with options: ${JSON.stringify(options)}`);
