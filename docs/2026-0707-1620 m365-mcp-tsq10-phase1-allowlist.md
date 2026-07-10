@@ -55,16 +55,42 @@ cost of org-wide search). **Entra-app note:** Core's app registration must addit
 
 ## Measurement (headline for Scott)
 
-Approximation = char count (tool name + description + parameter descriptions) / 4.
-Consistent across sets; a precise manifest-token count comes at the test-deploy gate.
+Two local approximations (no tokenizer yet; ~tokens = serialized chars / 4). The
+**full-schema** measure serializes the actual `tools/list` manifest entry per tool
+(name + description + `inputSchema` JSON, via `zodToJsonSchema`) — i.e. what the client
+really receives. The **description-only** measure (name + description + parameter
+descriptions) is a conservative lower bound. A precise tokenizer count comes at the
+test-deploy gate against the live manifest.
+
+Full-schema manifest (primary):
 
 | Set | Tools | ~Schema tokens |
 |---|---:|---:|
-| Full org surface (no filter) | 257 | ~64,200 |
-| **Current production** (tsq.9 `ENABLED_TOOLS` regex) | **166** | **~42,300** |
-| **Core allowlist** | **68** | **~18,900** |
+| Full org surface (no filter) | 257 | ~303,000 |
+| **Current production** (tsq.9 `ENABLED_TOOLS` regex) | **166** | **~202,000** |
+| **Core allowlist** | **68** | **~69,000** |
 
-**Core vs current production: −59% tools, −55% schema tokens (~23K tokens saved per conversation).**
+**Core vs current production: −59% tools, −66% schema tokens (~133K tokens saved per
+conversation).** Description-only lower bound agrees on direction: −55% tokens
+(~42K → ~19K). The large absolute baseline (~200K tokens of tool schema on every
+conversation today) is itself the case for the split.
+
+## Test deploy (Phase 1 validation gate) — live 2026-07-10
+
+- Image `ms-365-mcp-server:v0.88.2-tsq.10` built in ACR from commit `d232cab`.
+- Test Container App **`tsqm365mcp-core-test`** in `rg-tsq-m365-mcp` / env `tsqm365mcp-cae`,
+  separate from prod `tsqm365mcp-app`. Single replica, ephemeral `/tmp` token cache,
+  reuses UAMI `tsqm365mcp-uami` (Key Vault + ACR) and Entra app `M365 MCP`
+  (`eae48fd3-…`). Startup: `--http 3000 --org-mode -v`, `TOOL_ALLOWLIST=<inline core>`.
+- URL: `https://tsqm365mcp-core-test.jollywave-3fc86824.eastus2.azurecontainerapps.io/mcp`
+- The test app's `/oauth/callback` was added to the shared Entra app's redirect URIs
+  (prod + claude.ai URIs preserved).
+- **Live evidence the allowlist is active:** `/.well-known/oauth-protected-resource`
+  advertises exactly Core's 22 scopes — **no `TeamMember.Read.All`** (confirms the
+  `list-team-members` move in the real deployment). `GET /` → 200.
+- Registered-tool count (68) is logged per session (`-v`); confirmed on claude.ai connect.
+- **Teardown when done:** `az containerapp delete -n tsqm365mcp-core-test -g rg-tsq-m365-mcp`
+  and drop the test redirect URI from the Entra app.
 
 ## Not done yet / next
 
