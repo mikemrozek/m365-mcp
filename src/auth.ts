@@ -148,13 +148,18 @@ const SCOPE_HIERARCHY: ScopeHierarchy = {
 function buildScopesFromEndpoints(
   includeWorkAccountScopes: boolean = false,
   enabledToolsPattern?: string,
-  readOnly: boolean = false
+  readOnly: boolean = false,
+  toolAllowlist?: string[]
 ): string[] {
   const scopesSet = new Set<string>();
 
-  // Create regex for tool filtering if pattern is provided
+  // An explicit allowlist wins over the regex pattern (exact-match, no regex).
+  const allowSet = toolAllowlist ? new Set(toolAllowlist) : undefined;
+
+  // Create regex for tool filtering if pattern is provided (ignored when an
+  // allowlist is present).
   let enabledToolsRegex: RegExp | undefined;
-  if (enabledToolsPattern) {
+  if (!allowSet && enabledToolsPattern) {
     try {
       enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
       logger.info(`Building scopes with tool filter pattern: ${enabledToolsPattern}`);
@@ -165,14 +170,20 @@ function buildScopesFromEndpoints(
     }
   }
 
+  const isToolEnabled = (toolName: string): boolean => {
+    if (allowSet) return allowSet.has(toolName);
+    if (enabledToolsRegex) return enabledToolsRegex.test(toolName);
+    return true;
+  };
+
   endpoints.default.forEach((endpoint) => {
     // Skip write operations in read-only mode
     if (readOnly && endpoint.method.toUpperCase() !== 'GET') {
       return;
     }
 
-    // Skip endpoints that don't match the tool filter
-    if (enabledToolsRegex && !enabledToolsRegex.test(endpoint.toolName)) {
+    // Skip endpoints that don't match the tool filter / allowlist
+    if (!isToolEnabled(endpoint.toolName)) {
       return;
     }
 
@@ -203,8 +214,9 @@ function buildScopesFromEndpoints(
   });
 
   const scopes = Array.from(scopesSet);
-  if (enabledToolsPattern) {
-    logger.info(`Built ${scopes.length} scopes for filtered tools: ${scopes.join(', ')}`);
+  if (allowSet || enabledToolsPattern) {
+    const via = allowSet ? `allowlist (${allowSet.size} tools)` : `pattern ${enabledToolsPattern}`;
+    logger.info(`Built ${scopes.length} scopes for filtered tools via ${via}: ${scopes.join(', ')}`);
   }
 
   return scopes;

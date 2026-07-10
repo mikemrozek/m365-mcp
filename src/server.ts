@@ -115,7 +115,8 @@ class MicrosoftGraphServer {
         this.options.orgMode,
         this.authManager,
         this.multiAccount,
-        this.accountNames
+        this.accountNames,
+        this.options.toolAllowlist
       );
     }
 
@@ -234,7 +235,12 @@ class MicrosoftGraphServer {
         const requestOrigin = `${protocol}://${req.get('host')}`;
         const browserBase = publicBase ?? requestOrigin;
 
-        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+        const scopes = buildScopesFromEndpoints(
+          this.options.orgMode,
+          this.options.enabledTools,
+          false,
+          this.options.toolAllowlist
+        );
 
         const metadata: Record<string, unknown> = {
           issuer: browserBase,
@@ -261,7 +267,12 @@ class MicrosoftGraphServer {
         const requestOrigin = `${protocol}://${req.get('host')}`;
         const browserBase = publicBase ?? requestOrigin;
 
-        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+        const scopes = buildScopesFromEndpoints(
+          this.options.orgMode,
+          this.options.enabledTools,
+          false,
+          this.options.toolAllowlist
+        );
 
         res.json({
           resource: `${requestOrigin}/mcp`,

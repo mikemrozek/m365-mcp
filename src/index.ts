@@ -17,13 +17,21 @@ async function main(): Promise<void> {
     }
 
     const readOnly = args.readOnly || false;
-    const scopes = buildScopesFromEndpoints(includeWorkScopes, args.enabledTools, readOnly);
+    const scopes = buildScopesFromEndpoints(
+      includeWorkScopes,
+      args.enabledTools,
+      readOnly,
+      args.toolAllowlist
+    );
 
     if (args.listPermissions) {
       const sorted = [...scopes].sort((a, b) => a.localeCompare(b));
       const mode = includeWorkScopes ? 'org' : 'personal';
       const filter = args.enabledTools ? args.enabledTools : undefined;
-      console.log(JSON.stringify({ mode, readOnly, filter, permissions: sorted }, null, 2));
+      const allowlist = args.toolAllowlist ? args.toolAllowlist : undefined;
+      console.log(
+        JSON.stringify({ mode, readOnly, filter, allowlist, permissions: sorted }, null, 2)
+      );
       process.exit(0);
     }
 

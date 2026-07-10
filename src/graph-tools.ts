@@ -554,10 +554,15 @@ export function registerGraphTools(
   orgMode: boolean = false,
   authManager?: AuthManager,
   multiAccount: boolean = false,
-  accountNames: string[] = []
+  accountNames: string[] = [],
+  toolAllowlist?: string[]
 ): number {
+  // An explicit named allowlist (Phase 1 tiered rollout) wins over the
+  // ENABLED_TOOLS regex. Exact-match, no patterns.
+  const allowSet = toolAllowlist ? new Set(toolAllowlist) : undefined;
+
   let enabledToolsRegex: RegExp | undefined;
-  if (enabledToolsPattern) {
+  if (!allowSet && enabledToolsPattern) {
     try {
       enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
       logger.info(`Tool filtering enabled with pattern: ${enabledToolsPattern}`);
@@ -566,6 +571,19 @@ export function registerGraphTools(
     }
   }
 
+  // Single predicate used everywhere a tool is gated (endpoint tools and the
+  // hand-written custom tools below) so the allowlist and the regex never diverge.
+  const isToolEnabled = (toolName: string): boolean => {
+    if (allowSet) return allowSet.has(toolName);
+    if (enabledToolsRegex) return enabledToolsRegex.test(toolName);
+    return true;
+  };
+
+  if (allowSet) {
+    logger.info(`Tool allowlist enabled: ${allowSet.size} tools (exact match)`);
+  }
+
+  const registeredNames: string[] = [];
   let registeredCount = 0;
   let skippedCount = 0;
   let failedCount = 0;
@@ -590,8 +608,8 @@ export function registerGraphTools(
       }
     }
 
-    if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
-      logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
+    if (!isToolEnabled(tool.alias)) {
+      logger.info(`Skipping tool ${tool.alias} - not in allowlist / doesn't match filter`);
       skippedCount++;
       continue;
     }
@@ -762,6 +780,7 @@ export function registerGraphTools(
         },
         async (params) => executeGraphTool(tool, endpointConfig, graphClient, params, authManager)
       );
+      registeredNames.push(tool.alias);
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool ${tool.alias}: ${(error as Error).message}`);
@@ -774,7 +793,7 @@ export function registerGraphTools(
   }
 
   // Register parse-teams-url utility tool (no Graph API call)
-  if (!enabledToolsRegex || enabledToolsRegex.test('parse-teams-url')) {
+  if (isToolEnabled('parse-teams-url')) {
     try {
       server.tool(
         'parse-teams-url',
@@ -801,6 +820,7 @@ export function registerGraphTools(
           }
         }
       );
+      registeredNames.push('parse-teams-url');
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool parse-teams-url: ${(error as Error).message}`);
@@ -822,7 +842,7 @@ export function registerGraphTools(
     openWorldHint: true,
   };
 
-  if (!enabledToolsRegex || enabledToolsRegex.test('list-conversation-messages')) {
+  if (isToolEnabled('list-conversation-messages')) {
     try {
       const conversationMessagesTool = {
         alias: 'list-conversation-messages',
@@ -1005,6 +1025,7 @@ export function registerGraphTools(
           }
         }
       );
+      registeredNames.push('list-conversation-messages');
       registeredCount++;
     } catch (error) {
       logger.error(
@@ -1014,7 +1035,7 @@ export function registerGraphTools(
     }
   }
 
-  if (!enabledToolsRegex || enabledToolsRegex.test('list-drafts')) {
+  if (isToolEnabled('list-drafts')) {
     try {
       const draftsTool = {
         alias: 'list-drafts',
@@ -1082,6 +1103,7 @@ export function registerGraphTools(
           return executeGraphTool(draftsTool, draftsConfig, graphClient, callParams, authManager);
         }
       );
+      registeredNames.push('list-drafts');
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool list-drafts: ${(error as Error).message}`);
@@ -1089,7 +1111,7 @@ export function registerGraphTools(
     }
   }
 
-  if (!enabledToolsRegex || enabledToolsRegex.test('get-messages-batch')) {
+  if (isToolEnabled('get-messages-batch')) {
     try {
       server.tool(
         'get-messages-batch',
@@ -1208,6 +1230,7 @@ export function registerGraphTools(
           }
         }
       );
+      registeredNames.push('get-messages-batch');
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool get-messages-batch: ${(error as Error).message}`);
@@ -1221,7 +1244,7 @@ export function registerGraphTools(
   if (readOnly) {
     logger.info('Skipping write tool download-mail-attachment - read-only mode');
     skippedCount++;
-  } else if (!enabledToolsRegex || enabledToolsRegex.test('download-mail-attachment')) {
+  } else if (isToolEnabled('download-mail-attachment')) {
     try {
       // Simple OneDrive upload (PUT .../content) handles a single file up to
       // 250 MB, which covers every mail attachment (Exchange caps well below
@@ -1421,6 +1444,7 @@ export function registerGraphTools(
           }
         }
       );
+      registeredNames.push('download-mail-attachment');
       registeredCount++;
     } catch (error) {
       logger.error(`Failed to register tool download-mail-attachment: ${(error as Error).message}`);
@@ -1433,6 +1457,17 @@ export function registerGraphTools(
 
   logger.info(
     `Tool registration complete: ${registeredCount} registered, ${skippedCount} skipped, ${failedCount} failed`
+  );
+  // Governance audit trail (Phase 1 tiered rollout): record the filter source and
+  // the exact, sorted set of tools this connector exposes.
+  const filterSource = allowSet
+    ? `allowlist (${allowSet.size} tools requested)`
+    : enabledToolsPattern
+      ? `ENABLED_TOOLS regex: ${enabledToolsPattern}`
+      : 'none (all tools)';
+  logger.info(`Tool filter source: ${filterSource}`);
+  logger.info(
+    `Registered tools (${registeredNames.length}): ${[...registeredNames].sort((a, b) => a.localeCompare(b)).join(', ')}`
   );
   return registeredCount;
 }

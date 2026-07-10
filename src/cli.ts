@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getCombinedPresetPattern, listPresets, presetRequiresOrgMode } from './tool-categories.js';
+import { loadToolAllowlist } from './tool-allowlist.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(__dirname, '..', 'package.json');
@@ -34,6 +35,10 @@ program
   .option(
     '--enabled-tools <pattern>',
     'Filter tools using regex pattern (e.g., "excel|contact" to enable Excel and Contact tools)'
+  )
+  .option(
+    '--tool-allowlist <value>',
+    'Explicit exact-match tool allowlist: an inline JSON array of tool names, or a path to a JSON config file. Takes precedence over --enabled-tools / ENABLED_TOOLS.'
   )
   .option(
     '--preset <names>',
@@ -85,6 +90,8 @@ export interface CommandOptions {
   http?: string | boolean;
   enableAuthTools?: boolean;
   enabledTools?: string;
+  toolAllowlist?: string[];
+  toolAllowlistSource?: string;
   preset?: string;
   listPresets?: boolean;
   listPermissions?: boolean;
@@ -137,6 +144,35 @@ export function parseArgs(): CommandOptions {
 
   if (process.env.ENABLED_TOOLS) {
     options.enabledTools = process.env.ENABLED_TOOLS;
+  }
+
+  // Explicit named allowlist (Phase 1 of the tiered rollout). When set it wins
+  // outright over the ENABLED_TOOLS regex — one exact-match source of truth per
+  // connector tier. Parse errors fail closed at startup: without a valid list we
+  // must NOT fall through to exposing every tool.
+  const rawAllowlist =
+    (typeof options.toolAllowlist === 'string' ? (options.toolAllowlist as string) : undefined) ??
+    process.env.TOOL_ALLOWLIST;
+  if (rawAllowlist) {
+    let loaded;
+    try {
+      loaded = loadToolAllowlist(rawAllowlist);
+    } catch (error) {
+      console.error(`Error: ${(error as Error).message}`);
+      process.exit(1);
+    }
+    if (options.enabledTools) {
+      console.warn(
+        'Warning: both TOOL_ALLOWLIST and ENABLED_TOOLS/--enabled-tools are set. ' +
+          'The allowlist takes precedence; the regex filter is ignored.'
+      );
+    }
+    options.toolAllowlist = loaded.names;
+    options.toolAllowlistSource = loaded.source;
+    // Clear the regex so no downstream code path applies both filters.
+    options.enabledTools = undefined;
+  } else {
+    options.toolAllowlist = undefined;
   }
 
   // Validate tool filter regex early — fail at startup instead of silently
