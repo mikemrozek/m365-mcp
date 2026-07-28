@@ -18,7 +18,7 @@ import {
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import { requestContext } from './request-context.js';
+import { requestContext, type RequestActor } from './request-context.js';
 import crypto from 'node:crypto';
 
 /**
@@ -553,7 +553,10 @@ class MicrosoftGraphServer {
       app.get(
         '/mcp',
         microsoftBearerTokenAuthMiddleware,
-        async (req: Request & { microsoftAuth?: { accessToken: string } }, res: Response) => {
+        async (
+          req: Request & { microsoftAuth?: { accessToken: string; actor?: RequestActor } },
+          res: Response
+        ) => {
           const handler = async () => {
             const server = this.createMcpServer();
             const transport = new StreamableHTTPServerTransport({
@@ -571,7 +574,10 @@ class MicrosoftGraphServer {
 
           try {
             if (req.microsoftAuth) {
-              await requestContext.run({ accessToken: req.microsoftAuth.accessToken }, handler);
+              await requestContext.run(
+                { accessToken: req.microsoftAuth.accessToken, actor: req.microsoftAuth.actor },
+                handler
+              );
             } else {
               await handler();
             }
@@ -594,7 +600,10 @@ class MicrosoftGraphServer {
       app.post(
         '/mcp',
         microsoftBearerTokenAuthMiddleware,
-        async (req: Request & { microsoftAuth?: { accessToken: string } }, res: Response) => {
+        async (
+          req: Request & { microsoftAuth?: { accessToken: string; actor?: RequestActor } },
+          res: Response
+        ) => {
           const handler = async () => {
             const server = this.createMcpServer();
             const transport = new StreamableHTTPServerTransport({
@@ -612,7 +621,10 @@ class MicrosoftGraphServer {
 
           try {
             if (req.microsoftAuth) {
-              await requestContext.run({ accessToken: req.microsoftAuth.accessToken }, handler);
+              await requestContext.run(
+                { accessToken: req.microsoftAuth.accessToken, actor: req.microsoftAuth.actor },
+                handler
+              );
             } else {
               await handler();
             }

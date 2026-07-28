@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import logger from './logger.js';
+import { logToolUsage, withUsageLog } from './usage-log.js';
 import GraphClient from './graph-client.js';
 import AuthManager from './auth.js';
 import { api } from './generated/client.js';
@@ -118,7 +119,30 @@ interface CallToolResult {
   [key: string]: unknown;
 }
 
+/**
+ * Thin wrapper around the tool execution that records a structured usage record
+ * (which tool, by whom, success/error) for periodic tiered-rollout reporting.
+ * All exit paths of the impl flow through here, so coverage is uniform.
+ */
 async function executeGraphTool(
+  tool: (typeof api.endpoints)[0],
+  config: EndpointConfig | undefined,
+  graphClient: GraphClient,
+  params: Record<string, unknown>,
+  authManager?: AuthManager
+): Promise<CallToolResult> {
+  let result: CallToolResult;
+  try {
+    result = await executeGraphToolImpl(tool, config, graphClient, params, authManager);
+  } catch (error) {
+    logToolUsage(tool.alias, 'error');
+    throw error;
+  }
+  logToolUsage(tool.alias, result.isError ? 'error' : 'success');
+  return result;
+}
+
+async function executeGraphToolImpl(
   tool: (typeof api.endpoints)[0],
   config: EndpointConfig | undefined,
   graphClient: GraphClient,
@@ -1147,7 +1171,8 @@ export function registerGraphTools(
           title: 'get-messages-batch',
           ...mailListReadOnlyHints,
         },
-        async (params) => {
+        async (params) =>
+          withUsageLog('get-messages-batch', async () => {
           const messageIds = params.messageIds.filter((id) => typeof id === 'string' && id.trim());
           if (messageIds.length === 0) {
             return {
@@ -1228,7 +1253,7 @@ export function registerGraphTools(
               isError: true,
             };
           }
-        }
+        })
       );
       registeredNames.push('get-messages-batch');
       registeredCount++;
@@ -1291,7 +1316,8 @@ export function registerGraphTools(
           destructiveHint: false,
           openWorldHint: true,
         },
-        async (params) => {
+        async (params) =>
+          withUsageLog('download-mail-attachment', async () => {
           const messageId = (params.messageId ?? '').trim();
           const attachmentId = (params.attachmentId ?? '').trim();
           if (!messageId || !attachmentId) {
@@ -1442,7 +1468,7 @@ export function registerGraphTools(
               isError: true,
             };
           }
-        }
+        })
       );
       registeredNames.push('download-mail-attachment');
       registeredCount++;

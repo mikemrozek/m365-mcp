@@ -1,6 +1,36 @@
 import { Request, Response, NextFunction } from 'express';
 import logger from '../logger.js';
 import { getCloudEndpoints, type CloudType } from '../cloud-config.js';
+import type { RequestActor } from '../request-context.js';
+
+/**
+ * Best-effort decode of a JWT payload (no signature verification — Graph is the
+ * authority on validity; this is only used to derive the caller's identity for
+ * usage logging). Returns undefined for opaque/malformed tokens.
+ */
+function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
+  const parts = token.split('.');
+  if (parts.length !== 3) return undefined;
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Pull the caller's identity claims from an access token, if it is a decodable JWT. */
+export function actorFromToken(token: string): RequestActor | undefined {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return undefined;
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.trim() ? v.trim() : undefined;
+  const actor: RequestActor = {
+    oid: str(payload.oid),
+    upn: str(payload.preferred_username) ?? str(payload.upn) ?? str(payload.unique_name),
+    tid: str(payload.tid),
+  };
+  return actor.oid || actor.upn ? actor : undefined;
+}
 
 function buildWwwAuthenticate(req: Request, error: string, description: string): string {
   const protocol = req.secure ? 'https' : 'http';
@@ -30,7 +60,7 @@ function isJwtExpired(token: string): boolean {
  * refresh via the /token endpoint. Opaque tokens fall through and are validated by Graph.
  */
 export const microsoftBearerTokenAuthMiddleware = (
-  req: Request & { microsoftAuth?: { accessToken: string } },
+  req: Request & { microsoftAuth?: { accessToken: string; actor?: RequestActor } },
   res: Response,
   next: NextFunction
 ): void => {
@@ -63,7 +93,7 @@ export const microsoftBearerTokenAuthMiddleware = (
     return;
   }
 
-  req.microsoftAuth = { accessToken };
+  req.microsoftAuth = { accessToken, actor: actorFromToken(accessToken) };
 
   next();
 };
