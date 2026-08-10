@@ -19,6 +19,7 @@ import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext, type RequestActor } from './request-context.js';
+import { enqueueNotification, getSubscription, markLapsed } from './notifications.js';
 import crypto from 'node:crypto';
 
 /**
@@ -197,6 +198,67 @@ class MicrosoftGraphServer {
         }
 
         next();
+      });
+
+      // ---- Microsoft Graph change-notification receiver -------------------
+      // Public by necessity: Graph posts here unauthenticated. Two things keep
+      // it safe. Notifications are only accepted when their clientState matches
+      // the per-subscription secret we generated (constant-time compare), and
+      // the handler never fetches content — it enqueues a pointer and returns.
+      // Anything unrecognized is dropped, which is also the post-restart
+      // behavior for subscriptions whose registry entry is gone.
+      const handleValidationHandshake = (req: Request, res: Response): boolean => {
+        // Graph proves it owns the URL by asking us to echo a token, verbatim,
+        // as text/plain within 10 seconds. Applies to both routes.
+        const token = req.query.validationToken;
+        if (typeof token === 'string') {
+          logger.info('Graph notification endpoint validation handshake received');
+          res.status(200).type('text/plain').send(token);
+          return true;
+        }
+        return false;
+      };
+
+      app.post('/graph-notifications', (req: Request, res: Response) => {
+        if (handleValidationHandshake(req, res)) return;
+
+        const items = Array.isArray(req.body?.value) ? req.body.value : [];
+        let accepted = 0;
+        for (const item of items) {
+          const ok = enqueueNotification(item?.subscriptionId, item?.clientState, {
+            resource: item?.resource ?? '',
+            changeType: item?.changeType ?? 'unknown',
+            resourceId: item?.resourceData?.id,
+          });
+          if (ok) accepted++;
+        }
+        if (accepted < items.length) {
+          logger.warn(
+            `Graph notifications: accepted ${accepted}/${items.length} (unknown subscription or clientState mismatch)`
+          );
+        }
+        // Always 202 — Graph retries on non-2xx, and retrying a notification we
+        // deliberately rejected would accomplish nothing.
+        res.sendStatus(202);
+      });
+
+      app.post('/graph-lifecycle', (req: Request, res: Response) => {
+        if (handleValidationHandshake(req, res)) return;
+
+        // Teams subscriptions require this URL whenever expiry is more than an
+        // hour out. It tells us a subscription needs reauthorization, was
+        // removed, or that notifications were missed — all of which mean the
+        // user must act, so we mark the record and surface it on next drain.
+        const items = Array.isArray(req.body?.value) ? req.body.value : [];
+        for (const item of items) {
+          const subscriptionId = item?.subscriptionId;
+          const event = item?.lifecycleEvent ?? 'unknown';
+          if (!subscriptionId) continue;
+          const record = getSubscription(subscriptionId);
+          if (!record || record.clientState !== item?.clientState) continue;
+          markLapsed(subscriptionId, `lifecycle: ${event}`);
+        }
+        res.sendStatus(202);
       });
 
       const oauthProvider = new MicrosoftOAuthProvider(this.authManager, this.secrets!);
@@ -575,7 +637,11 @@ class MicrosoftGraphServer {
           try {
             if (req.microsoftAuth) {
               await requestContext.run(
-                { accessToken: req.microsoftAuth.accessToken, actor: req.microsoftAuth.actor },
+                {
+                  accessToken: req.microsoftAuth.accessToken,
+                  actor: req.microsoftAuth.actor,
+                  origin: `${req.secure ? 'https' : 'http'}://${req.get('host')}`,
+                },
                 handler
               );
             } else {
@@ -622,7 +688,11 @@ class MicrosoftGraphServer {
           try {
             if (req.microsoftAuth) {
               await requestContext.run(
-                { accessToken: req.microsoftAuth.accessToken, actor: req.microsoftAuth.actor },
+                {
+                  accessToken: req.microsoftAuth.accessToken,
+                  actor: req.microsoftAuth.actor,
+                  origin: `${req.secure ? 'https' : 'http'}://${req.get('host')}`,
+                },
                 handler
               );
             } else {

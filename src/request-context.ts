@@ -14,6 +14,13 @@ export interface RequestContext {
   accessToken: string;
   /** Present in HTTP/OAuth mode; absent for stdio/CLI (single local user). */
   actor?: RequestActor;
+  /**
+   * Public origin this request arrived on (`https://host`), used to build the
+   * change-notification callback URL. Derived from the forwarded Host header
+   * exactly as the OAuth discovery endpoints do, so no extra configuration is
+   * needed; `MS365_MCP_PUBLIC_URL` overrides it when set.
+   */
+  origin?: string;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();

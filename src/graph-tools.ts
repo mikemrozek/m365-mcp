@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import { getRequestTokens } from './request-context.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
+import { registerNotificationTools } from './notification-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
@@ -1477,6 +1478,31 @@ export function registerGraphTools(
       failedCount++;
     }
   }
+
+  // ---- Change-notification tools --------------------------------------------
+  // These wrap the generated /subscriptions endpoints rather than replacing
+  // them: the value added here is the notificationUrl plumbing, the clientState
+  // secret, the per-user queue, and the long-poll drain.
+  //
+  // Honest limitation, repeated in every description below: this removes the
+  // token cost of polling inside an open session. It cannot wake a closed
+  // session — nothing can push into claude.ai.
+  registerNotificationTools(server, graphClient, {
+    isToolEnabled,
+    readOnly,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+    skip: (name: string) => {
+      logger.info(`Skipping write tool ${name} - read-only mode`);
+      skippedCount++;
+    },
+  });
 
   // Layer 3 (list-accounts tool) is registered by registerAuthTools in auth-tools.ts.
   // It is the canonical owner of account discovery — no duplicate registration here.
