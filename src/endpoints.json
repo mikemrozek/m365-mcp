@@ -111,7 +111,7 @@
     "method": "delete",
     "toolName": "delete-mail-message",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Soft delete — moves to Deleted Items. To permanently delete, delete again from Deleted Items."
+    "llmTip": "Soft delete — moves the message to Deleted Items. IMPORTANT: moving changes the message id, so calling this again with the SAME id fails with 404 ErrorItemNotFound. Do not retry a delete that appears to have failed — check Deleted Items first, because the first call usually succeeded. To permanently delete, list the item in Deleted Items (list-mail-folder-messages with mailFolder-id 'deleteditems') to get its NEW id, then delete that id."
   },
   {
     "pathPattern": "/me/messages/{message-id}/move",
