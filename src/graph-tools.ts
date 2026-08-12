@@ -13,6 +13,7 @@ import { TOOL_CATEGORIES } from './tool-categories.js';
 import { getRequestTokens } from './request-context.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { registerNotificationTools } from './notification-tools.js';
+import { registerFileTextTools } from './file-text-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
@@ -1501,6 +1502,22 @@ export function registerGraphTools(
     skip: (name: string) => {
       logger.info(`Skipping write tool ${name} - read-only mode`);
       skippedCount++;
+    },
+  });
+
+  // ---- Document text extraction ---------------------------------------------
+  // Read-only: these fetch bytes and return extracted text, writing nothing, so
+  // they stay available in read-only mode (unlike download-mail-attachment,
+  // which stages a copy to OneDrive and is therefore a write).
+  registerFileTextTools(server, graphClient, {
+    isToolEnabled,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
     },
   });
 

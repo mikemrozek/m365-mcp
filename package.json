@@ -39,8 +39,10 @@
     "commander": "^11.1.0",
     "dotenv": "^17.0.1",
     "express": "^5.2.1",
+    "fflate": "^0.8.3",
     "js-yaml": "^4.1.0",
     "open": "^11.0.0",
+    "unpdf": "^1.7.0",
     "winston": "^3.17.0",
     "zod": "^3.24.2",
     "zod-to-json-schema": "^3.25.1"

@@ -135,12 +135,30 @@ describe('Calendar View Tools', () => {
     it('should include fetchAllPages parameter for GET tools', () => {
       registerGraphTools(mockServer, mockGraphClient, false);
 
+      // Custom tools that are not paginated Graph list endpoints, so they have
+      // no fetchAllPages parameter. (list-conversation-messages and list-drafts
+      // are deliberately absent: they delegate to the shared Graph executor via
+      // synthetic endpoints and so DO paginate, and must keep being checked.)
+      const NOT_PAGINATED_LISTS = new Set([
+        'parse-teams-url',
+        'get-messages-batch',
+        'download-mail-attachment',
+        'subscribe-to-changes',
+        'list-my-subscriptions',
+        'unsubscribe-from-changes',
+        'check-notifications',
+        'wait-for-notifications',
+        'read-mail-attachment-text',
+        'read-onedrive-file-text',
+      ]);
+
       for (const call of mockServer.tool.mock.calls) {
         const toolName = call[0] as string;
-        // Skip utility tools that are not Graph API endpoints
-        if (toolName === 'parse-teams-url') continue;
+        if (NOT_PAGINATED_LISTS.has(toolName)) continue;
         const paramSchema = call[2] as Record<string, z.ZodTypeAny>;
-        expect(paramSchema).toHaveProperty('fetchAllPages');
+        expect(paramSchema, `${toolName} should expose fetchAllPages`).toHaveProperty(
+          'fetchAllPages'
+        );
       }
     });
 

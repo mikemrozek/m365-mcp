@@ -37,10 +37,43 @@ vi.mock('../src/generated/client.js', () => ({
   },
 }));
 
+/**
+ * Custom (hand-registered) tools that `registerGraphTools` adds on top of the
+ * generated endpoints. Listed explicitly rather than baked into a count so that
+ * adding a tool fails these tests with a readable diff of names, and has to be
+ * accounted for deliberately.
+ */
+const CUSTOM_TOOLS = [
+  'parse-teams-url',
+  'list-conversation-messages',
+  'list-drafts',
+  'get-messages-batch',
+  'download-mail-attachment',
+  'subscribe-to-changes',
+  'list-my-subscriptions',
+  'unsubscribe-from-changes',
+  'check-notifications',
+  'wait-for-notifications',
+  'read-mail-attachment-text',
+  'read-onedrive-file-text',
+];
+
+const MOCKED_ENDPOINTS = [
+  'list-mail-messages',
+  'send-mail',
+  'list-calendar-events',
+  'list-excel-worksheets',
+  'get-current-user',
+];
+
 describe('Tool Filtering', () => {
   let server: McpServer;
   let graphClient: GraphClient;
   let toolSpy: ReturnType<typeof vi.spyOn>;
+
+  /** Names of every tool registered, sorted — asserting on these beats counting. */
+  const registered = () => toolSpy.mock.calls.map((c) => c[0] as string).sort();
+  const sorted = (names: string[]) => [...names].sort();
 
   beforeEach(() => {
     server = new McpServer({ name: 'test', version: '1.0.0' });
@@ -51,8 +84,8 @@ describe('Tool Filtering', () => {
   it('should register all tools when no filter is provided', () => {
     registerGraphTools(server, graphClient, false);
 
-    // 5 mocked endpoints + 3 utility tools (parse-teams-url, list-conversation-messages, list-drafts)
-    expect(toolSpy).toHaveBeenCalledTimes(8);
+    // Every mocked endpoint plus every custom tool, with nothing filtered out.
+    expect(registered()).toEqual(sorted([...MOCKED_ENDPOINTS, ...CUSTOM_TOOLS]));
     expect(toolSpy).toHaveBeenCalledWith(
       'list-mail-messages',
       expect.any(String),
@@ -93,27 +126,22 @@ describe('Tool Filtering', () => {
   it('should filter tools by regex pattern - mail only', () => {
     registerGraphTools(server, graphClient, false, 'mail');
 
-    expect(toolSpy).toHaveBeenCalledTimes(2);
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'send-mail',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
+    // Two mocked endpoints match 'mail', as do two custom tools.
+    expect(registered()).toEqual(
+      sorted([
+        'list-mail-messages',
+        'send-mail',
+        'download-mail-attachment',
+        'read-mail-attachment-text',
+      ])
     );
   });
 
   it('should filter tools by regex pattern - calendar or excel', () => {
     registerGraphTools(server, graphClient, false, 'calendar|excel');
 
-    expect(toolSpy).toHaveBeenCalledTimes(2);
+    // No custom tool name contains 'calendar' or 'excel'.
+    expect(registered()).toEqual(sorted(['list-calendar-events', 'list-excel-worksheets']));
     expect(toolSpy).toHaveBeenCalledWith(
       'list-calendar-events',
       expect.any(String),
@@ -133,21 +161,16 @@ describe('Tool Filtering', () => {
   it('should handle invalid regex patterns gracefully', () => {
     registerGraphTools(server, graphClient, false, '[invalid regex');
 
-    // 5 mocked endpoints + 3 utility tools (no filter applied on invalid regex)
-    expect(toolSpy).toHaveBeenCalledTimes(8);
+    // An unusable pattern must fall back to registering everything, not nothing.
+    expect(registered()).toEqual(sorted([...MOCKED_ENDPOINTS, ...CUSTOM_TOOLS]));
   });
 
   it('should combine read-only and filtering correctly', () => {
     registerGraphTools(server, graphClient, true, 'mail');
 
-    expect(toolSpy).toHaveBeenCalledTimes(1);
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
+    // Read-only drops the writes: send-mail (POST) and download-mail-attachment
+    // (stages a copy to OneDrive). Text extraction writes nothing, so it stays.
+    expect(registered()).toEqual(sorted(['list-mail-messages', 'read-mail-attachment-text']));
   });
 
   it('should register no tools when pattern matches nothing', () => {

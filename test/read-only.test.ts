@@ -58,6 +58,34 @@ vi.mock('../src/logger.js', () => {
   };
 });
 
+/**
+ * Custom (hand-registered) tools added by registerGraphTools on top of the
+ * generated endpoints. Split by whether they survive read-only mode, so these
+ * tests assert on identity rather than a count that rots whenever a tool is
+ * added.
+ */
+const CUSTOM_TOOLS_READ_ONLY = [
+  'parse-teams-url',
+  'list-conversation-messages',
+  'list-drafts',
+  'get-messages-batch',
+  'list-my-subscriptions',
+  'check-notifications',
+  'wait-for-notifications',
+  'read-mail-attachment-text',
+  'read-onedrive-file-text',
+];
+
+/** The above plus the ones that write, and so are skipped in read-only mode. */
+const CUSTOM_TOOLS_ALL = [
+  ...CUSTOM_TOOLS_READ_ONLY,
+  'download-mail-attachment',
+  'subscribe-to-changes',
+  'unsubscribe-from-changes',
+];
+
+const sorted = (names: unknown[]) => [...(names as string[])].sort();
+
 describe('Read-Only Mode', () => {
   let mockServer: { tool: ReturnType<typeof vi.fn> };
 
@@ -83,10 +111,9 @@ describe('Read-Only Mode', () => {
 
     registerGraphTools(mockServer, {} as GraphClient, options.readOnly);
 
-    // 1 GET endpoint + 3 utility tools (parse-teams-url, list-conversation-messages, list-drafts)
-    expect(mockServer.tool).toHaveBeenCalledTimes(4);
-
     const toolCalls = mockServer.tool.mock.calls.map((call: unknown[]) => call[0]);
+    // Only the GET endpoint survives read-only, alongside the non-writing customs.
+    expect(sorted(toolCalls)).toEqual(sorted(['list-mail-messages', ...CUSTOM_TOOLS_READ_ONLY]));
     expect(toolCalls).toContain('list-mail-messages');
     expect(toolCalls).not.toContain('send-mail');
     expect(toolCalls).not.toContain('delete-mail-message');
@@ -100,10 +127,17 @@ describe('Read-Only Mode', () => {
 
     registerGraphTools(mockServer, {} as GraphClient, options.readOnly);
 
-    // 4 mocked endpoints (get-schedule skipped: workScopes only, no orgMode) + 3 utility tools
-    expect(mockServer.tool).toHaveBeenCalledTimes(7);
-
     const toolCalls = mockServer.tool.mock.calls.map((call: unknown[]) => call[0]);
+    // All 4 mocked endpoints (get-schedule needs orgMode) plus every custom tool.
+    expect(sorted(toolCalls)).toEqual(
+      sorted([
+        'list-mail-messages',
+        'send-mail',
+        'delete-mail-message',
+        'update-mail-folder',
+        ...CUSTOM_TOOLS_ALL,
+      ])
+    );
     expect(toolCalls).toContain('list-mail-messages');
     expect(toolCalls).toContain('send-mail');
     expect(toolCalls).toContain('delete-mail-message');
@@ -132,8 +166,10 @@ describe('Read-Only Mode', () => {
     // PATCH endpoint should still be skipped (readOnly bypass is POST-only)
     expect(toolCalls).not.toContain('update-mail-folder');
 
-    // 2 graph tools (list-mail-messages + get-schedule) + 3 utility tools
-    expect(mockServer.tool).toHaveBeenCalledTimes(5);
+    // Exactly the two permitted Graph tools, plus the non-writing customs.
+    expect(sorted(toolCalls)).toEqual(
+      sorted(['list-mail-messages', 'get-schedule', ...CUSTOM_TOOLS_READ_ONLY])
+    );
   });
 
   it('should block PATCH and DELETE endpoints in read-only mode regardless of readOnly flag', () => {
