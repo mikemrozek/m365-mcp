@@ -154,6 +154,65 @@ describe('long-poll', () => {
   });
 });
 
+describe('per-subscription filtering', () => {
+  beforeEach(() => __resetForTests());
+
+  function twoSubscriptions() {
+    registerSubscription(makeRecord({ subscriptionId: 'sub-mail', friendly: 'inbox' }));
+    registerSubscription(
+      makeRecord({ subscriptionId: 'sub-chat', friendly: 'chat:abc', clientState: 'chat-state' })
+    );
+    enqueueNotification('sub-mail', 'secret-state', { resource: 'm', changeType: 'created' });
+    enqueueNotification('sub-chat', 'chat-state', { resource: 'c', changeType: 'created' });
+  }
+
+  it('drains only the named subscription and leaves the rest queued', () => {
+    twoSubscriptions();
+
+    const chatOnly = drain(OWNER, 'sub-chat');
+    expect(chatOnly.notifications).toHaveLength(1);
+    expect(chatOnly.notifications[0].subscriptionId).toBe('sub-chat');
+
+    // The mail notification survived the filtered drain.
+    const rest = drain(OWNER);
+    expect(rest.notifications).toHaveLength(1);
+    expect(rest.notifications[0].subscriptionId).toBe('sub-mail');
+  });
+
+  it('a scoped wait ignores — and preserves — other subscriptions’ notifications', async () => {
+    registerSubscription(makeRecord({ subscriptionId: 'sub-mail', friendly: 'inbox' }));
+    registerSubscription(
+      makeRecord({ subscriptionId: 'sub-chat', friendly: 'chat:abc', clientState: 'chat-state' })
+    );
+
+    const pending = waitForNotifications(OWNER, 120, 'sub-chat');
+    // Mail arrives first; it must NOT wake a chat-scoped wait.
+    enqueueNotification('sub-mail', 'secret-state', { resource: 'm', changeType: 'created' });
+    const entries = await pending;
+
+    expect(entries).toEqual([]);
+    // And the mail notification is still there, not silently consumed.
+    expect(drain(OWNER).notifications).toHaveLength(1);
+  });
+
+  it('a scoped wait wakes for its own subscription', async () => {
+    twoSubscriptions();
+    const entries = await waitForNotifications(OWNER, 5000, 'sub-mail');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].subscriptionId).toBe('sub-mail');
+  });
+
+  it('a filtered drain preserves the truncation counter', () => {
+    registerSubscription(makeRecord());
+    for (let i = 0; i < 205; i++) {
+      enqueueNotification('sub-1', 'secret-state', { resource: 'r', changeType: 'created' });
+    }
+    // Filtered read must not swallow the drop signal for the whole queue.
+    expect(drain(OWNER, 'other-sub').dropped).toBeGreaterThan(0);
+    expect(drain(OWNER).dropped).toBeGreaterThan(0);
+  });
+});
+
 describe('renewal bookkeeping', () => {
   beforeEach(() => __resetForTests());
 

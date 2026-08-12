@@ -134,13 +134,6 @@
     "llmTip": "Max 3MB. Body requires @odata.type: {\"@odata.type\": \"#microsoft.graph.fileAttachment\", \"name\": \"file.pdf\", \"contentBytes\": \"<base64>\"}."
   },
   {
-    "pathPattern": "/me/messages/{message-id}/attachments",
-    "method": "post",
-    "toolName": "add-mail-reference-attachment",
-    "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Attaches a OneDrive/SharePoint file by reference (link), not by upload. Body requires @odata.type: { \"@odata.type\": \"#microsoft.graph.referenceAttachment\", \"name\": \"file.pdf\", \"sourceUrl\": \"https://.../file.pdf\", \"providerType\": \"oneDriveBusiness\", \"permission\": \"view\", \"isFolder\": false }. providerType: 'oneDriveBusiness' | 'oneDriveConsumer' | 'dropbox' | 'other'. permission: 'view' | 'edit' | 'anonymousView' | 'anonymousEdit' | 'organizationView' | 'organizationEdit'. Recipients see a clickable link to the source file rather than an attached copy."
-  },
-  {
     "pathPattern": "/me/messages/{message-id}/attachments/createUploadSession",
     "method": "post",
     "toolName": "create-mail-attachment-upload-session",
@@ -1052,7 +1045,8 @@
     "pathPattern": "/me/chats",
     "method": "get",
     "toolName": "list-chats",
-    "workScopes": ["Chat.Read"]
+    "workScopes": ["Chat.Read"],
+    "llmTip": "Lists the signed-in user's Teams chats — one-on-one, group, and meeting chats — with id, chatType, topic, and lastUpdatedDateTime. This is the tool for finding a chatId: use it before list-chat-messages, send-chat-message, or subscribing to a chat. Use $expand=members to see participants, and order by lastUpdatedDateTime to find recent conversations. Do not use create-chat to find an existing chat; create-chat starts a new one."
   },
   {
     "pathPattern": "/chats/{chat-id}",
@@ -1619,7 +1613,7 @@
     "method": "get",
     "toolName": "list-calendar-events-delta",
     "scopes": ["Calendars.Read"],
-    "llmTip": "Incremental sync of events across the default calendar. First call returns all events plus @odata.deltaLink. Subsequent calls with that link return only additions/updates/removals. Use $select to limit fields. Deltas expire after ~30 days — start over if the server returns 410 Gone. For a time-bounded view with delta semantics, use list-calendar-view-delta instead. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages."
+    "llmTip": "Incremental sync of events across the default calendar. First call returns all events plus @odata.deltaLink. Subsequent calls with that link return only additions/updates/removals. Use $select to limit fields. Deltas expire after ~30 days — start over if the server returns 410 Gone. For a time-bounded view with delta semantics, use list-calendar-view-delta instead. Note: $top is not accepted by Graph on /delta endpoints — page size is controlled internally; use @odata.nextLink to walk pages. SCHEMA WARNING: this tool's generated schema marks startDateTime and endDateTime as required, and its description was copied from calendarView, but /me/events/delta does NOT filter by a date range — any dates you pass are ignored, and this returns events across the whole calendar. If you need a genuine date range, use list-calendar-view-delta, where those parameters are real."
   },
   {
     "pathPattern": "/me/calendarView/delta()",

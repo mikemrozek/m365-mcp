@@ -187,9 +187,11 @@ export function registerNotificationTools(
         'with get-mail-message / get-messages-batch / get-chat-message using the returned ids.\n\n' +
         'IMPORTANT LIMITATIONS: notifications accumulate on the server and are only readable ' +
         'while this conversation is open — this cannot wake a closed conversation, because ' +
-        'nothing can push into the client. Notifications carry ids only, never message content. ' +
-        'Subscriptions are held in memory, so after a connector restart or reconnect you must ' +
-        're-subscribe. Renewal happens automatically whenever you make any call.',
+        'nothing can push into the client. Notifications carry ids only, never message content, ' +
+        'and they are not a guarantee the item still exists — a 404 when you fetch one later ' +
+        'is expected, not an error. Subscriptions are held in memory, so after a connector ' +
+        'restart or reconnect you must re-subscribe. Renewal happens automatically whenever ' +
+        'you make any call.',
       {
         resource: z
           .string()
@@ -364,19 +366,31 @@ export function registerNotificationTools(
         'Cheap — returns ids and resource pointers only, never message content; follow up with ' +
         'get-mail-message, get-messages-batch, or get-chat-message to read anything. Returns ' +
         'immediately even when empty; use wait-for-notifications instead if you want to block ' +
-        'until something arrives.',
-      {},
+        'until something arrives.\n\n' +
+        'A notification is a record that something changed, NOT a guarantee the item still ' +
+        'exists. By the time you fetch it the item may have been moved by a rule or deleted, ' +
+        'and a 404 / ErrorItemNotFound on follow-up is an expected outcome, not a failure — ' +
+        'skip it and carry on. Pass subscriptionId to drain just one subscription and leave ' +
+        'the rest queued.',
+      {
+        subscriptionId: z
+          .string()
+          .optional()
+          .describe(
+            'Only drain notifications from this subscription. Omit to drain everything queued.'
+          ),
+      },
       {
         title: 'check-notifications',
         readOnlyHint: true,
         openWorldHint: false,
       },
-      async () =>
+      async ({ subscriptionId }) =>
         withUsageLog('check-notifications', async () => {
           const actor = getRequestActor();
           if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
           await renewDueSubscriptions(graphClient, actor.oid);
-          const result = drain(actor.oid);
+          const result = drain(actor.oid, subscriptionId?.trim() || undefined);
           return jsonResult({
             count: result.notifications.length,
             notifications: result.notifications,
@@ -398,9 +412,14 @@ export function registerNotificationTools(
       'wait-for-notifications',
       'Waits until a change notification arrives for you, or until the timeout elapses. Call ' +
         'this in a loop to watch for activity cheaply: each empty cycle costs a few tokens ' +
-        'instead of a full list query. Returns as soon as anything arrives. Like ' +
-        'check-notifications, it returns pointers only — fetch content separately. This only ' +
-        'works while the conversation is open; it cannot wake a closed one.',
+        'instead of a full list query. Like check-notifications, it returns pointers only — ' +
+        'fetch content separately, and treat a 404 on follow-up as expected, since the item ' +
+        'may have been moved or deleted since the notification fired. This only works while ' +
+        'the conversation is open; it cannot wake a closed one.\n\n' +
+        'The timeout is a ceiling on how long this waits, NOT a window on what it returns: ' +
+        'anything already queued comes back immediately, including events from before the ' +
+        'call. Pass subscriptionId to wait on one subscription only — otherwise a wait ' +
+        'intended for a chat will also return, and consume, your queued mail notifications.',
       {
         timeoutSeconds: z
           .number()
@@ -409,13 +428,20 @@ export function registerNotificationTools(
           .max(50)
           .optional()
           .describe('How long to wait before returning empty. Default 45, max 50.'),
+        subscriptionId: z
+          .string()
+          .optional()
+          .describe(
+            'Only wake for notifications from this subscription; others stay queued. ' +
+              'Omit to wait on all of them.'
+          ),
       },
       {
         title: 'wait-for-notifications',
         readOnlyHint: true,
         openWorldHint: false,
       },
-      async ({ timeoutSeconds }) =>
+      async ({ timeoutSeconds, subscriptionId }) =>
         withUsageLog('wait-for-notifications', async () => {
           const actor = getRequestActor();
           if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
@@ -423,7 +449,11 @@ export function registerNotificationTools(
           // Capped below the client's tool-call timeout so a quiet period
           // returns cleanly instead of erroring.
           const seconds = Math.min(timeoutSeconds ?? 45, 50);
-          const notifications = await waitForNotifications(actor.oid, seconds * 1000);
+          const notifications = await waitForNotifications(
+            actor.oid,
+            seconds * 1000,
+            subscriptionId?.trim() || undefined
+          );
           return jsonResult({
             count: notifications.length,
             notifications,

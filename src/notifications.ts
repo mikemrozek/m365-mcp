@@ -64,6 +64,8 @@ interface UserQueue {
 interface Waiter {
   resolve: (entries: NotificationEntry[]) => void;
   timer: NodeJS.Timeout;
+  /** When set, this waiter only wakes for notifications from that subscription. */
+  subscriptionId?: string;
 }
 
 /**
@@ -208,25 +210,44 @@ export function enqueueNotification(
   return true;
 }
 
-/** Hands queued notifications to any long-poll waiters and clears the queue. */
+/**
+ * Hands queued notifications to any long-poll waiters. A waiter scoped to one
+ * subscription only takes entries from it and leaves the rest queued, so a user
+ * waiting on a chat doesn't silently consume their own inbox notifications.
+ */
 function releaseWaiters(ownerOid: string): void {
   const list = waiters.get(ownerOid);
   if (!list?.length) return;
-  const entries = drainQueue(ownerOid);
-  if (!entries.length) return;
-  waiters.delete(ownerOid);
+  const remaining: Waiter[] = [];
   for (const w of list) {
-    clearTimeout(w.timer);
-    w.resolve(entries);
+    const entries = drainQueue(ownerOid, w.subscriptionId);
+    if (entries.length) {
+      clearTimeout(w.timer);
+      w.resolve(entries);
+    } else {
+      remaining.push(w);
+    }
   }
+  if (remaining.length) waiters.set(ownerOid, remaining);
+  else waiters.delete(ownerOid);
 }
 
-function drainQueue(ownerOid: string): NotificationEntry[] {
+/** Removes and returns queued entries, optionally only those from one subscription. */
+function drainQueue(ownerOid: string, subscriptionId?: string): NotificationEntry[] {
   const q = queues.get(ownerOid);
   if (!q || q.entries.length === 0) return [];
-  const entries = q.entries;
-  q.entries = [];
-  return entries;
+  if (!subscriptionId) {
+    const entries = q.entries;
+    q.entries = [];
+    return entries;
+  }
+  const taken: NotificationEntry[] = [];
+  const kept: NotificationEntry[] = [];
+  for (const entry of q.entries) {
+    (entry.subscriptionId === subscriptionId ? taken : kept).push(entry);
+  }
+  q.entries = kept;
+  return taken;
 }
 
 export interface DrainResult {
@@ -236,13 +257,18 @@ export interface DrainResult {
   lapsedSubscriptions: Array<{ subscriptionId: string; friendly: string; reason?: string }>;
 }
 
-/** Instant drain: returns and clears everything queued for the caller. */
-export function drain(ownerOid: string): DrainResult {
+/**
+ * Instant drain: returns and clears what is queued for the caller, or only the
+ * given subscription's entries when `subscriptionId` is supplied.
+ */
+export function drain(ownerOid: string, subscriptionId?: string): DrainResult {
   const q = queues.get(ownerOid);
   const dropped = q?.dropped ?? 0;
-  if (q) q.dropped = 0;
+  // Only clear the drop counter on a full drain — a filtered read shouldn't
+  // discard a truncation signal that applies to the whole queue.
+  if (q && !subscriptionId) q.dropped = 0;
   return {
-    notifications: drainQueue(ownerOid),
+    notifications: drainQueue(ownerOid, subscriptionId),
     dropped,
     lapsedSubscriptions: listSubscriptions(ownerOid)
       .filter((r) => r.lapsed)
@@ -261,9 +287,12 @@ export function drain(ownerOid: string): DrainResult {
  */
 export function waitForNotifications(
   ownerOid: string,
-  timeoutMs: number
+  timeoutMs: number,
+  subscriptionId?: string
 ): Promise<NotificationEntry[]> {
-  const queued = drainQueue(ownerOid);
+  // Anything already queued returns immediately — the timeout bounds how long
+  // we are willing to wait, it does not restrict results to the wait window.
+  const queued = drainQueue(ownerOid, subscriptionId);
   if (queued.length) return Promise.resolve(queued);
 
   return new Promise((resolve) => {
@@ -278,7 +307,7 @@ export function waitForNotifications(
     }, timeoutMs);
 
     const list = waiters.get(ownerOid) ?? [];
-    list.push({ resolve, timer });
+    list.push({ resolve, timer, subscriptionId });
     waiters.set(ownerOid, list);
   });
 }
