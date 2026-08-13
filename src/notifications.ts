@@ -119,6 +119,16 @@ export function unregisterSubscription(subscriptionId: string, ownerOid: string)
   const record = registry.get(subscriptionId);
   if (!record || record.ownerOid !== ownerOid) return false;
   registry.delete(subscriptionId);
+
+  // Purge anything this subscription already queued. Without this, entries that
+  // arrived before the cancel survive in memory and surface on some later drain
+  // — which reads exactly like a cancelled subscription still delivering.
+  // Observed 2026-08-12: two notifications queued on 08-10 reappeared three days
+  // later, after their subscription had been cancelled and confirmed gone.
+  const q = queues.get(ownerOid);
+  if (q) {
+    q.entries = q.entries.filter((e) => e.subscriptionId !== subscriptionId);
+  }
   return true;
 }
 

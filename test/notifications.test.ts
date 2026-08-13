@@ -51,6 +51,23 @@ describe('notifications registry', () => {
     expect(listSubscriptions(OWNER)).toHaveLength(0);
   });
 
+  it('purges queued notifications when a subscription is cancelled', () => {
+    registerSubscription(makeRecord());
+    registerSubscription(
+      makeRecord({ subscriptionId: 'sub-2', friendly: 'chat:x', clientState: 'other-state' })
+    );
+    enqueueNotification('sub-1', 'secret-state', { resource: 'r', changeType: 'created' });
+    enqueueNotification('sub-2', 'other-state', { resource: 'r', changeType: 'created' });
+
+    expect(unregisterSubscription('sub-1', OWNER)).toBe(true);
+
+    // Entries queued before the cancel must not survive to a later drain, where
+    // they would look like a cancelled subscription still delivering.
+    const result = drain(OWNER);
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0].subscriptionId).toBe('sub-2');
+  });
+
   it('generates distinct clientState secrets', () => {
     expect(newClientState()).not.toEqual(newClientState());
   });

@@ -150,6 +150,7 @@
     "pathPattern": "/me/messages/{message-id}/attachments/{attachment-id}",
     "method": "get",
     "toolName": "get-mail-attachment",
+    "llmTip": "Returns the attachment INCLUDING its bytes as base64 (contentBytes), which is expensive: a 1 MB file becomes ~1.4 MB of text in context, and the bytes cannot be written to disk without retyping them. To READ or SUMMARISE a document, use read-mail-attachment-text instead — it extracts the text server-side. To obtain the actual file, use download-mail-attachment. Use this tool for attachment METADATA, for itemAttachment/referenceAttachment types, or for genuinely tiny files.",
     "scopes": ["Mail.Read"]
   },
   {
@@ -450,7 +451,7 @@
     "toolName": "download-onedrive-file-content",
     "scopes": ["Files.Read"],
     "returnDownloadUrl": true,
-    "llmTip": "Returns a temporary download URL, NOT the file content directly."
+    "llmTip": "Returns a temporary download URL, NOT the file content directly. If your goal is to READ or SUMMARISE the file, use read-onedrive-file-text instead — it extracts the document text server-side, needs no network access, and costs far less context. Note the URL points at the tenant SharePoint host, which some execution environments cannot reach, so fetching it may fail even though this call succeeded."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}",
@@ -1046,7 +1047,7 @@
     "method": "get",
     "toolName": "list-chats",
     "workScopes": ["Chat.Read"],
-    "llmTip": "Lists the signed-in user's Teams chats — one-on-one, group, and meeting chats — with id, chatType, topic, and lastUpdatedDateTime. This is the tool for finding a chatId: use it before list-chat-messages, send-chat-message, or subscribing to a chat. Use $expand=members to see participants, and order by lastUpdatedDateTime to find recent conversations. Do not use create-chat to find an existing chat; create-chat starts a new one."
+    "llmTip": "Lists the signed-in user's Teams chats — one-on-one, group, and meeting chats — with id, chatType, topic, and lastUpdatedDateTime. This is the tool for finding a chatId: use it before list-chat-messages, send-chat-message, or subscribing to a chat. Use $expand=members to see participants. Do NOT pass $orderby — Graph rejects ordering on this collection ('QueryOptions to order by lastUpdatedDateTime is not supported'); fetch the page and sort by lastUpdatedDateTime yourself. Results are paged, so a chat you expect may be on a later page — follow @odata.nextLink before concluding it does not exist. Do not use create-chat to find an existing chat; create-chat starts a new one."
   },
   {
     "pathPattern": "/chats/{chat-id}",

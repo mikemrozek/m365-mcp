@@ -1279,10 +1279,18 @@ export function registerGraphTools(
       const MAX_ATTACHMENT_BYTES = 250 * 1024 * 1024;
       server.tool(
         'download-mail-attachment',
-        'Downloads a mail attachment via OneDrive staging — returns a pre-authed ' +
+        'READ THIS FIRST: if your goal is to READ, SUMMARISE, or ANSWER QUESTIONS ABOUT the ' +
+          'attachment, use read-mail-attachment-text instead — it returns the document text ' +
+          'directly, needs no network access, and costs far less context. Use THIS tool only ' +
+          'when the actual file bytes are needed (saving it to disk, forwarding it, or a format ' +
+          'with no text layer such as a scan or image).\n\n' +
+          'Downloads a mail attachment via OneDrive staging — returns a pre-authed ' +
           'download URL plus metadata, NOT the file bytes themselves. Use this for ' +
           'any attachment large enough that returning base64 through get-mail-attachment ' +
           'would overflow context (realistically anything over ~50KB).\n\n' +
+          'NOTE: the returned URL points at the tenant SharePoint host. Some execution ' +
+          'environments cannot reach it, so fetching the URL may fail even though staging ' +
+          'succeeded — another reason to prefer read-mail-attachment-text for reading.\n\n' +
           'Flow: (1) list-mail-attachments to find the attachmentId; ' +
           '(2) download-mail-attachment to stage the file to OneDrive and get a URL; ' +
           '(3) fetch the URL directly (curl/HTTP) to wherever you need the file.\n\n' +
