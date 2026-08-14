@@ -53,6 +53,40 @@ interface GraphRequestOptions {
   [key: string]: unknown;
 }
 
+/**
+ * Renders a request for logging WITHOUT its payload or credentials.
+ *
+ * This previously logged `JSON.stringify(options)` wholesale, which wrote every
+ * outbound body to the log — `send-mail` logged the email, `add-mail-attachment`
+ * logged base64 file content — and, in multi-account mode, the caller's access
+ * token alongside it. It also silently defeated the redaction `executeGraphTool`
+ * performs one layer up, which strips the token before its own log line.
+ *
+ * Diagnostic value lives in the method, the endpoint and the rough size, none of
+ * which require the content. Anything genuinely needing the body should be read
+ * from a debugger, not from a log file that outlives the request.
+ *
+ * SEC-2026-001, .claude/security-docs/assessments/2026-08-14-audit.md
+ */
+export function describeRequestForLog(options: GraphRequestOptions = {}): string {
+  const parts = [`method=${(options.method || 'GET').toUpperCase()}`];
+  if (options.body !== undefined) {
+    const size =
+      typeof options.body === 'string'
+        ? Buffer.byteLength(options.body, 'utf8')
+        : Buffer.byteLength(String(options.body), 'utf8');
+    parts.push(`bodyBytes=${size}`);
+  }
+  // Header NAMES are safe and useful (e.g. confirming ConsistencyLevel was
+  // applied); their values are not, so they are never rendered.
+  const headerNames = Object.keys(options.headers ?? {});
+  if (headerNames.length) parts.push(`headers=[${headerNames.join(',')}]`);
+  if (options.accessToken) parts.push('accessToken=[REDACTED]');
+  if (options.rawResponse) parts.push('rawResponse=true');
+  if (options.excludeResponse) parts.push('excludeResponse=true');
+  return parts.join(' ');
+}
+
 interface ContentItem {
   type: 'text';
   text: string;
@@ -394,7 +428,7 @@ class GraphClient {
 
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {
     try {
-      logger.info(`Calling ${endpoint} with options: ${JSON.stringify(options)}`);
+      logger.info(`Calling ${endpoint} ${describeRequestForLog(options)}`);
 
       // Use new OAuth-aware request method
       const result = await this.makeRequest(endpoint, options);
