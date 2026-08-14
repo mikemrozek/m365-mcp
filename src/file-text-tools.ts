@@ -46,6 +46,9 @@ const maxCharsParam = z
   );
 
 const SHARED_DESCRIPTION =
+  'SUPERSEDED by get-file, which covers both mail attachments and documents and also falls '  +
+  'back to a link when a file cannot be read as text. Prefer get-file unless you specifically '  +
+  'want extraction to fail loudly on an unreadable file.\n\n' +
   'Returns the extracted TEXT, not the file and not a download link, so it can be read and ' +
   'reasoned over directly. Supports pdf, docx, xlsx, pptx, and plain-text formats (csv, json, ' +
   'xml, html, md, txt). Spreadsheets come back as tab-separated rows per sheet.\n\n' +

@@ -56,6 +56,8 @@ const CUSTOM_TOOLS = [
   'wait-for-notifications',
   'read-mail-attachment-text',
   'read-onedrive-file-text',
+  'get-file',
+  'attach-file',
 ];
 
 const MOCKED_ENDPOINTS = [

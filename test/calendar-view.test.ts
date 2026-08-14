@@ -150,6 +150,8 @@ describe('Calendar View Tools', () => {
         'wait-for-notifications',
         'read-mail-attachment-text',
         'read-onedrive-file-text',
+        'get-file',
+        'attach-file',
       ]);
 
       for (const call of mockServer.tool.mock.calls) {

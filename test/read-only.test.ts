@@ -82,6 +82,8 @@ const CUSTOM_TOOLS_ALL = [
   'download-mail-attachment',
   'subscribe-to-changes',
   'unsubscribe-from-changes',
+  'get-file',
+  'attach-file',
 ];
 
 const sorted = (names: unknown[]) => [...(names as string[])].sort();

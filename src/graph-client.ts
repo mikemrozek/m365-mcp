@@ -310,6 +310,88 @@ class GraphClient {
     return text ? JSON.parse(text) : {};
   }
 
+  /**
+   * Uploads bytes through a Graph upload session, which is the only supported
+   * route for mail attachments of 3 MB or more and the recommended one for
+   * large drive items.
+   *
+   * Three rules from Microsoft's docs are load-bearing here and easy to get
+   * wrong:
+   *   - The `uploadUrl` is pre-authenticated and opaque. Sending an
+   *     `Authorization` header on the PUT can fail with 401, so we deliberately
+   *     send none. It is also NOT on the tenant host — mail attachment sessions
+   *     live on outlook.office.com and drive sessions on a regional
+   *     *.up.1drv.com host — which is why this upload runs server-side rather
+   *     than from the client sandbox.
+   *   - Every chunk except the last must be a multiple of 320 KiB, or large
+   *     transfers fail when the final range is committed.
+   *   - Ranges must be sent sequentially; out-of-order writes are rejected.
+   *
+   * @param createSessionEndpoint Graph path that mints the session.
+   * @param body Request body for the session creation call.
+   * @returns The final response Graph returns when the last chunk commits.
+   */
+  async uploadViaSession(
+    createSessionEndpoint: string,
+    body: Record<string, unknown>,
+    buffer: Buffer,
+    options: GraphRequestOptions = {}
+  ): Promise<unknown> {
+    const session = (await this.makeRequest(createSessionEndpoint, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+      body: JSON.stringify(body),
+    })) as { uploadUrl?: string };
+
+    if (!session?.uploadUrl) {
+      throw new Error(
+        `Graph did not return an uploadUrl for ${createSessionEndpoint}: ${JSON.stringify(session)}`
+      );
+    }
+
+    const total = buffer.byteLength;
+    // 320 KiB is the required alignment; 10 MiB is Microsoft's recommended
+    // chunk for stable connections and stays well under the 60 MiB ceiling.
+    const CHUNK = 10 * 1024 * 1024;
+    let offset = 0;
+    let last: unknown = {};
+
+    while (offset < total) {
+      const end = Math.min(offset + CHUNK, total);
+      const chunk = buffer.subarray(offset, end);
+      const response = await fetch(session.uploadUrl, {
+        method: 'PUT',
+        headers: {
+          // No Authorization header — the URL already carries its own auth.
+          'Content-Length': String(chunk.byteLength),
+          'Content-Range': `bytes ${offset}-${end - 1}/${total}`,
+        },
+        body: new Uint8Array(
+          chunk.buffer,
+          chunk.byteOffset,
+          chunk.byteLength
+        ) as unknown as BodyInit,
+      });
+
+      if (!response.ok) {
+        // Best effort cleanup so an abandoned session doesn't linger.
+        await fetch(session.uploadUrl, { method: 'DELETE' }).catch(() => {});
+        throw new Error(
+          `Upload session failed at bytes ${offset}-${end - 1}/${total}: ` +
+            `${response.status} ${response.statusText} - ${await response.text()}`
+        );
+      }
+
+      const text = await response.text();
+      last = text ? JSON.parse(text) : {};
+      offset = end;
+    }
+
+    logger.info(`[GRAPH CLIENT] Upload session complete: ${total} bytes`);
+    return last;
+  }
+
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {
     try {
       logger.info(`Calling ${endpoint} with options: ${JSON.stringify(options)}`);

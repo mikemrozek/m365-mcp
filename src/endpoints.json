@@ -150,7 +150,7 @@
     "pathPattern": "/me/messages/{message-id}/attachments/{attachment-id}",
     "method": "get",
     "toolName": "get-mail-attachment",
-    "llmTip": "Returns the attachment INCLUDING its bytes as base64 (contentBytes), which is expensive: a 1 MB file becomes ~1.4 MB of text in context, and the bytes cannot be written to disk without retyping them. To READ or SUMMARISE a document, use read-mail-attachment-text instead — it extracts the text server-side. To obtain the actual file, use download-mail-attachment. Use this tool for attachment METADATA, for itemAttachment/referenceAttachment types, or for genuinely tiny files.",
+    "llmTip": "SUPERSEDED by get-file — use that instead; it fetches any file and returns text or a link, deciding for you. Returns the attachment INCLUDING its bytes as base64 (contentBytes), which is expensive: a 1 MB file becomes ~1.4 MB of text in context, and the bytes cannot be written to disk without retyping them. To READ or SUMMARISE a document, use read-mail-attachment-text instead — it extracts the text server-side. To obtain the actual file, use download-mail-attachment. Use this tool for attachment METADATA, for itemAttachment/referenceAttachment types, or for genuinely tiny files.",
     "scopes": ["Mail.Read"]
   },
   {
@@ -451,7 +451,7 @@
     "toolName": "download-onedrive-file-content",
     "scopes": ["Files.Read"],
     "returnDownloadUrl": true,
-    "llmTip": "Returns a temporary download URL, NOT the file content directly. If your goal is to READ or SUMMARISE the file, use read-onedrive-file-text instead — it extracts the document text server-side, needs no network access, and costs far less context. Note the URL points at the tenant SharePoint host, which some execution environments cannot reach, so fetching it may fail even though this call succeeded."
+    "llmTip": "SUPERSEDED by get-file — use that instead; it fetches any file and returns text or a link, deciding for you. Returns a temporary download URL, NOT the file content directly. If your goal is to READ or SUMMARISE the file, use read-onedrive-file-text instead — it extracts the document text server-side, needs no network access, and costs far less context. Note the URL points at the tenant SharePoint host, which some execution environments cannot reach, so fetching it may fail even though this call succeeded."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}",

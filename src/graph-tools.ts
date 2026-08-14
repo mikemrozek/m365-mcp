@@ -14,6 +14,7 @@ import { getRequestTokens } from './request-context.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { registerNotificationTools } from './notification-tools.js';
 import { registerFileTextTools } from './file-text-tools.js';
+import { registerFileTools } from './file-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
@@ -1279,11 +1280,9 @@ export function registerGraphTools(
       const MAX_ATTACHMENT_BYTES = 250 * 1024 * 1024;
       server.tool(
         'download-mail-attachment',
-        'READ THIS FIRST: if your goal is to READ, SUMMARISE, or ANSWER QUESTIONS ABOUT the ' +
-          'attachment, use read-mail-attachment-text instead — it returns the document text ' +
-          'directly, needs no network access, and costs far less context. Use THIS tool only ' +
-          'when the actual file bytes are needed (saving it to disk, forwarding it, or a format ' +
-          'with no text layer such as a scan or image).\n\n' +
+        'SUPERSEDED by get-file — prefer that tool. It handles any file, mail attachment or ' +
+          'document, and decides for you whether to return the text or a link. Use THIS tool ' +
+          'only if you specifically need a staged OneDrive copy.\n\n' +
           'Downloads a mail attachment via OneDrive staging — returns a pre-authed ' +
           'download URL plus metadata, NOT the file bytes themselves. Use this for ' +
           'any attachment large enough that returning base64 through get-mail-attachment ' +
@@ -1526,6 +1525,26 @@ export function registerGraphTools(
     fail: (name: string, error: Error) => {
       logger.error(`Failed to register tool ${name}: ${error.message}`);
       failedCount++;
+    },
+  });
+
+  // ---- Unified file handling -------------------------------------------------
+  // get-file and attach-file supersede the per-delivery tools above. They are
+  // registered as writes because both stage bytes into OneDrive or a draft.
+  registerFileTools(server, graphClient, {
+    isToolEnabled,
+    readOnly,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+    skip: (name: string) => {
+      logger.info(`Skipping write tool ${name} - read-only mode`);
+      skippedCount++;
     },
   });
 
