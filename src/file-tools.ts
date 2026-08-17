@@ -12,30 +12,50 @@ import {
 } from './lib/extract-text.js';
 
 /**
- * Unified file handling: one tool per direction, with the SERVER deciding how
- * bytes are delivered.
+ * Unified file handling: one tool per direction.
  *
  * Why one tool. Previously the model had to choose between get-mail-attachment
  * (inline base64), download-mail-attachment (stage + URL) and
  * read-mail-attachment-text (extracted text) — and it chose badly. Observed in
  * production: it anchored on whichever tool a previous message had named, hit
  * the sandbox egress wall, and concluded attachment reading was broken hours
- * after the working tool had shipped. The agent should not be making a delivery
- * decision it lacks the information to make.
+ * after the working tool had shipped.
  *
- * The routing rule is deliberately simple and lives here, not in the model:
+ * WHAT THE SERVER DECIDES, AND WHAT IT DOES NOT (revised 2026-08-17)
  *
- *   readable document  -> return its TEXT
- *   anything else      -> return a URL
+ * The server decides TRANSPORT — whether bytes come back inline or as a link,
+ * based on size. It does NOT decide INTERPRETATION.
  *
- * Bytes never traverse the conversation. That is a cost control as much as a
- * correctness one: a 2.9 MB attachment rendered as base64 would consume a large
- * share of a user's token budget, which for staff on a small plan can exhaust
- * the budget in a single call.
+ * The first version conflated the two: it extracted text and returned that,
+ * which silently assumed the caller wanted prose. Scott's objection was correct
+ * — "how do you know the caller even wanted a summary? What if it just had to
+ * scan the document? Maybe it's a CSV and it's just looking for a specific
+ * value." Our own test demonstrated the cost: a 51-page PDF came back truncated
+ * at 50,000 of 74,747 characters, so anything in the last third was silently
+ * unreachable.
+ *
+ * So the default is now a link, and the agent decides what to do with the file
+ * — parse it, search it, run code over it, or read it. Extraction is still
+ * available, but only when explicitly asked for via `as: 'text'`.
+ *
+ *   default            -> a short-lived pre-authenticated LINK
+ *   tiny text files    -> inline, because a link would cost more than the content
+ *   as: 'text'         -> extracted text, because the caller said so
+ *
+ * Bytes still never traverse the conversation unasked. That is a cost control:
+ * a 2.9 MB attachment as base64 would consume a large share of a user's token
+ * budget, which on a small plan can exhaust it in one call.
  */
 
-/** Above this, don't even pull the bytes to try extraction — just hand back a URL. */
+/** Ceiling for explicit text extraction; above this a link is the only sane answer. */
 const MAX_EXTRACT_BYTES = 40 * 1024 * 1024;
+
+/**
+ * Below this, a file is returned inline rather than as a link — the link,
+ * metadata and an extra round trip would cost more than the content itself.
+ * Deliberately small: this is the exception, not the rule.
+ */
+const INLINE_MAX_BYTES = 32 * 1024;
 
 /** Simple PUT covers a single file to this size; beyond it Graph needs a session. */
 const MAX_SIMPLE_UPLOAD_BYTES = 250 * 1024 * 1024;
@@ -150,16 +170,20 @@ export function registerFileTools(
       'THE tool for getting at a file, whether it is a mail attachment or a OneDrive / ' +
         'SharePoint document. Use this instead of get-mail-attachment, ' +
         'download-mail-attachment, read-mail-attachment-text, download-onedrive-file-content ' +
-        'or read-onedrive-file-text — it replaces all of them and picks the right delivery ' +
-        'itself.\n\n' +
-        'You do not choose how the file comes back; the server decides and tells you what it ' +
-        'did in the `delivery` field:\n' +
-        '  • `text` — the document was readable, so you get its contents directly. This is the ' +
-        'normal case for PDF, Word, Excel, PowerPoint and plain-text files.\n' +
-        '  • `url` — the file is not readable as text (an image, a zip, a video) or is too ' +
-        'large, so you get a short-lived pre-authenticated link instead.\n\n' +
-        'File bytes are never returned through the conversation, so a large attachment cannot ' +
-        'exhaust the context or the token budget.\n\n' +
+        'or read-onedrive-file-text — it replaces all of them.\n\n' +
+        'By default you get a short-lived pre-authenticated DOWNLOAD LINK, and you decide what ' +
+        'to do with the file: fetch and parse it, search it, run code over it, or read it. The ' +
+        'server does not interpret the file or assume what you wanted.\n\n' +
+        'The `delivery` field tells you what came back:\n' +
+        '  • `url` — a download link, valid about an hour, no auth header needed. The normal case.\n' +
+        '  • `inline` — the file was tiny (under 32KB) and is included directly, because a link ' +
+        'would have cost more than the content.\n' +
+        '  • `text` — you asked for text with `as: "text"` and the document was readable.\n\n' +
+        "Pass `as: 'text'` ONLY when you actually want the document's prose — a summary, a " +
+        'question answered from it. Do not use it when you need the file itself, exact ' +
+        'structure, or data you intend to compute over: extraction flattens layout, drops ' +
+        'anything without a text layer, and is capped, so a value in a long document can be cut ' +
+        'off without you knowing.\n\n' +
         'Identify the file by messageId + attachmentId, or by itemId (with driveId for a ' +
         'SharePoint library).',
       {
@@ -188,6 +212,14 @@ export function registerFileTools(
           .describe(
             "For a shared/other mailbox: the user id or UPN. Omit (or 'me') for the signed-in user."
           ),
+        as: z
+          .enum(['link', 'text'])
+          .optional()
+          .describe(
+            "How you want the file. 'link' (default) returns a download link and leaves the " +
+              "file intact for you to handle. 'text' extracts the document's prose server-side " +
+              '— only ask for this when prose is genuinely what you want.'
+          ),
         maxChars: z
           .number()
           .int()
@@ -195,8 +227,8 @@ export function registerFileTools(
           .max(MAX_CHARS_LIMIT)
           .optional()
           .describe(
-            `Cap on returned text. Default ${DEFAULT_MAX_CHARS}, ceiling ${MAX_CHARS_LIMIT}. ` +
-              'Raise only when the whole document is genuinely needed.'
+            `Only applies with as: 'text'. Cap on returned text; default ${DEFAULT_MAX_CHARS}, ` +
+              `ceiling ${MAX_CHARS_LIMIT}.`
           ),
       },
       {
@@ -244,9 +276,18 @@ export function registerFileTools(
           const contentType = meta?.contentType ?? meta?.file?.mimeType ?? '';
           const size = meta?.size ?? 0;
 
-          // Decision point. Oversized files skip extraction entirely so we never
-          // pull tens of megabytes just to discover we can't read them.
-          if (size <= MAX_EXTRACT_BYTES) {
+          // --- INTERPRETATION: only when the caller explicitly asked for it ----
+          if (params.as === 'text') {
+            if (size > MAX_EXTRACT_BYTES) {
+              return jsonResult(
+                {
+                  error:
+                    `File is ${size} bytes, too large to extract text from (limit ` +
+                    `${MAX_EXTRACT_BYTES}). Call again without as:'text' to get a download link.`,
+                },
+                true
+              );
+            }
             try {
               const { buffer } = await graphClient.fetchBinary(source.contentPath);
               const result = await extractText(
@@ -269,18 +310,70 @@ export function registerFileTools(
                   ? {
                       note:
                         `Text truncated at ${result.text.length} of ${result.totalChars} ` +
-                        `characters. Call again with a larger maxChars for the rest.`,
+                        `characters — the rest is NOT included. Call again with a larger ` +
+                        `maxChars, or without as:'text' to get the whole file as a link.`,
                     }
                   : {}),
               });
             } catch (error) {
               if (!(error instanceof UnsupportedFormatError)) throw error;
-              // Not readable as text — fall through to the URL route. This is an
-              // expected outcome (images, archives, scans), not a failure.
+              // Asked for text, but this file has none. Say so and give the link
+              // rather than silently substituting a different answer.
               logger.info(
-                `get-file: ${filename} is not text-extractable (${error.format}), delivering URL`
+                `get-file: ${filename} has no text layer (${error.format}), falling back to link`
               );
+              const url = await deliverUrl(graphClient, source, filename, contentType, size);
+              return jsonResult({
+                delivery: 'url',
+                name: filename,
+                size,
+                ...url,
+                note:
+                  `You asked for text, but this file has none to extract (${error.format}). ` +
+                  `Here is a download link instead.`,
+              });
             }
+          }
+
+          // --- TRANSPORT: the only decision the server makes by default --------
+          // Tiny files come back inline because a link, its metadata and a second
+          // round trip would cost more than the content itself.
+          if (size > 0 && size <= INLINE_MAX_BYTES) {
+            const { buffer, contentType: fetched } = await graphClient.fetchBinary(
+              source.contentPath
+            );
+            const effectiveType = contentType || fetched || '';
+            // Deliberately strict. Substring matching is a trap here: a .docx
+            // reports application/vnd.openxmlformats-…, which CONTAINS "xml"
+            // but is a ZIP archive — decoding it as UTF-8 returns garbage.
+            // Extension is the reliable signal; mime type only via exact match.
+            const TEXT_TYPES = new Set([
+              'application/json',
+              'application/xml',
+              'application/x-yaml',
+              'application/yaml',
+              'application/javascript',
+            ]);
+            const looksTextual =
+              /\.(txt|csv|tsv|json|xml|md|log|ya?ml|ini|conf)$/i.test(filename) ||
+              /^text\//i.test(effectiveType) ||
+              TEXT_TYPES.has(effectiveType.split(';')[0].trim().toLowerCase());
+
+            if (looksTextual) {
+              logger.info(`get-file: delivering ${filename} inline (${buffer.byteLength}b)`);
+              return jsonResult({
+                delivery: 'inline',
+                name: filename,
+                size: buffer.byteLength,
+                contentType: effectiveType,
+                content: buffer.toString('utf8'),
+                note:
+                  'Small text file returned directly. This is the raw file content, not an ' +
+                  'interpretation of it.',
+              });
+            }
+            // Small but binary — a link is still the right answer; base64 through
+            // the conversation helps nobody.
           }
 
           const url = await deliverUrl(graphClient, source, filename, contentType, size);
@@ -288,11 +381,13 @@ export function registerFileTools(
             delivery: 'url',
             name: filename,
             size,
+            contentType,
             ...url,
             note:
-              'This file could not be delivered as text, so here is a pre-authenticated link ' +
-              '(valid roughly one hour, no auth header needed). Fetch it from an environment ' +
-              'that can reach the tenant SharePoint host — some sandboxes cannot.',
+              'Download link, valid roughly one hour, no auth header needed. Fetch it and do ' +
+              "whatever you need with the file. If you want the document's prose instead, call " +
+              "again with as:'text'. Note some sandboxes cannot reach the tenant SharePoint " +
+              'host — if the fetch is refused, that is an environment restriction, not a bad link.',
           });
         })
     );
@@ -371,6 +466,12 @@ export function registerFileTools(
 
           const { buffer } = await graphClient.fetchBinary(source.contentPath);
           const size = buffer.byteLength;
+          // Hash the bytes we actually send. Graph's reported attachment size
+          // includes MIME envelope overhead (~165 bytes observed), so size is
+          // NOT usable as an integrity check — a corrupt upload can report a
+          // plausible size. Corruption was the originally reported symptom, so
+          // the caller needs something it can actually verify against.
+          const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
 
           if (size > MAX_SIMPLE_UPLOAD_BYTES) {
             return jsonResult(
@@ -399,7 +500,11 @@ export function registerFileTools(
               route: 'direct',
               name: filename,
               size,
+              sha256,
               draftMessageId: params.draftMessageId.trim(),
+              note:
+                'sha256 is of the bytes uploaded. Verify a downloaded copy against it — the ' +
+                "attachment's reported size includes MIME overhead and will not match.",
             });
           }
 
@@ -421,7 +526,11 @@ export function registerFileTools(
             route: 'uploadSession',
             name: filename,
             size,
+            sha256,
             draftMessageId: params.draftMessageId.trim(),
+            note:
+              'sha256 is of the bytes uploaded. Verify a downloaded copy against it — the ' +
+              "attachment's reported size includes MIME overhead and will not match.",
           });
         })
     );

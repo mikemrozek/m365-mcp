@@ -72,7 +72,29 @@ describe('get-file routing', () => {
   const client = () =>
     ({ makeRequest, fetchBinary, putBinary }) as unknown as Partial<GraphClient>;
 
-  it('delivers a readable document as text, never as bytes', async () => {
+  it('defaults to a LINK, not text — the server does not interpret the file', async () => {
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'report.docx',
+      size: 5000,
+      contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    fetchBinary.mockResolvedValue({ buffer: makeDocx('Quarterly revenue was flat'), contentType: '' });
+    putBinary.mockResolvedValueOnce({
+      id: 'staged-1',
+      '@microsoft.graph.downloadUrl': 'https://tenant.example/staged',
+    });
+
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { messageId: 'm1', attachmentId: 'a1' });
+
+    // Scott's requirement: hand over the file, let the agent decide what to do.
+    expect(payload.delivery).toBe('url');
+    expect(payload.downloadUrl).toBe('https://tenant.example/staged');
+    expect(payload.text).toBeUndefined();
+  });
+
+  it('extracts text ONLY when explicitly asked', async () => {
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.fileAttachment',
       name: 'report.docx',
@@ -82,16 +104,75 @@ describe('get-file routing', () => {
     fetchBinary.mockResolvedValueOnce({ buffer: makeDocx('Quarterly revenue was flat'), contentType: '' });
 
     const { handlers } = harness(client());
-    const { payload } = await call(handlers, 'get-file', { messageId: 'm1', attachmentId: 'a1' });
+    const { payload } = await call(handlers, 'get-file', {
+      messageId: 'm1',
+      attachmentId: 'a1',
+      as: 'text',
+    });
 
     expect(payload.delivery).toBe('text');
     expect(payload.text).toContain('Quarterly revenue was flat');
-    // The decisive property: no base64 payload anywhere in the response.
     expect(JSON.stringify(payload)).not.toMatch(/contentBytes/);
-    expect(putBinary).not.toHaveBeenCalled();
   });
 
-  it('falls back to a URL when the file has no text layer', async () => {
+  it('never decodes a binary container as text just because its mime type says xml', async () => {
+    // Regression: .docx reports application/vnd.openxmlformats-… which CONTAINS
+    // "xml" but is a ZIP. A substring match here returned garbage as UTF-8.
+    makeRequest.mockResolvedValueOnce({
+      name: 'small.docx',
+      size: 4000,
+      file: { mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+    });
+    fetchBinary.mockResolvedValue({ buffer: makeDocx('hello'), contentType: '' });
+    makeRequest.mockResolvedValueOnce({
+      id: 'd1',
+      '@microsoft.graph.downloadUrl': 'https://tenant.example/small',
+    });
+
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { itemId: 'd1' });
+
+    expect(payload.delivery).toBe('url');
+    expect(payload.content).toBeUndefined();
+  });
+
+  it('returns a genuinely tiny text file inline, since a link would cost more', async () => {
+    makeRequest.mockResolvedValueOnce({ name: 'notes.txt', size: 12, file: { mimeType: 'text/plain' } });
+    fetchBinary.mockResolvedValueOnce({ buffer: Buffer.from('hello world!'), contentType: 'text/plain' });
+
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { itemId: 'd1' });
+
+    expect(payload.delivery).toBe('inline');
+    expect(payload.content).toBe('hello world!');
+  });
+
+  it('gives a link, not an error, when text was asked for but none exists', async () => {
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'logo.png',
+      size: 40000,
+      contentType: 'image/png',
+    });
+    fetchBinary.mockResolvedValue({ buffer: Buffer.from('notanimage'), contentType: 'image/png' });
+    putBinary.mockResolvedValueOnce({
+      id: 'staged-2',
+      '@microsoft.graph.downloadUrl': 'https://tenant.example/png',
+    });
+
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'get-file', {
+      messageId: 'm1',
+      attachmentId: 'a1',
+      as: 'text',
+    });
+
+    expect(isError).toBeUndefined();
+    expect(payload.delivery).toBe('url');
+    expect(payload.note).toMatch(/no text|none to extract/i);
+  });
+
+  it('returns a link for a file with no text layer', async () => {
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.fileAttachment',
       name: 'logo.png',
@@ -112,7 +193,7 @@ describe('get-file routing', () => {
     expect(payload.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it('skips extraction entirely for very large files', async () => {
+  it('never pulls bytes for a large file it only needs to link to', async () => {
     makeRequest.mockResolvedValueOnce({
       name: 'huge.pdf',
       size: 100 * 1024 * 1024,
@@ -190,6 +271,8 @@ describe('attach-file size routing', () => {
 
     expect(payload.route).toBe('direct');
     expect(uploadViaSession).not.toHaveBeenCalled();
+    // Size cannot verify integrity (MIME overhead), so a hash must be returned.
+    expect(payload.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('uses an upload session at the 3 MB boundary — the actual defect', async () => {
@@ -204,6 +287,7 @@ describe('attach-file size routing', () => {
     });
 
     expect(payload.route).toBe('uploadSession');
+    expect(payload.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(uploadViaSession).toHaveBeenCalledOnce();
     const [endpoint, body] = uploadViaSession.mock.calls[0];
     expect(endpoint).toContain('createUploadSession');
