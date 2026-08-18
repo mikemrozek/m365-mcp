@@ -380,7 +380,10 @@ export function registerFileTools(
           return jsonResult({
             delivery: 'url',
             name: filename,
-            size,
+            // Graph's reported size. For mail attachments this includes MIME
+            // overhead and will exceed the actual file — compare `bytes` (and
+            // the sha256) when verifying a download, never this.
+            reportedSize: size,
             contentType,
             ...url,
             note:
@@ -552,13 +555,23 @@ async function deliverUrl(
   size: number
 ): Promise<Record<string, unknown>> {
   if (source.label === 'drive item') {
-    const item = (await graphClient.makeRequest(
-      source.metaPath.replace(/\?.*$/, '') + '?$select=id,@microsoft.graph.downloadUrl'
-    )) as Record<string, unknown>;
-    return {
-      downloadUrl: item['@microsoft.graph.downloadUrl'],
-      expiresInSeconds: 3600,
-    };
+    // Do NOT $select here. `@microsoft.graph.downloadUrl` is an OData annotation,
+    // not a selectable property: adding it to $select suppresses it, so the call
+    // succeeds and returns an item with no download URL at all. That produced a
+    // response claiming delivery:'url' with no url in it — reported from
+    // production 2026-08-17. Fetching the item plainly returns the annotation.
+    const item = (await graphClient.makeRequest(source.metaPath.replace(/\?.*$/, ''))) as Record<
+      string,
+      unknown
+    >;
+    const downloadUrl = item['@microsoft.graph.downloadUrl'];
+    if (typeof downloadUrl !== 'string' || !downloadUrl) {
+      throw new Error(
+        'Graph returned no download URL for this item. It may be a folder, a OneNote ' +
+          'section, or a file type without downloadable content.'
+      );
+    }
+    return { downloadUrl, expiresInSeconds: 3600 };
   }
 
   if (size > MAX_SIMPLE_UPLOAD_BYTES) {
@@ -586,6 +599,11 @@ async function deliverUrl(
   return {
     downloadUrl,
     sha256,
+    // The byte count the hash was computed over. Graph's attachment metadata
+    // reports a LARGER number because it includes MIME envelope overhead (~165
+    // bytes observed), so the two must be distinguishable or a caller comparing
+    // them concludes the transfer was corrupt when it was not.
+    bytes: buffer.byteLength,
     expiresInSeconds: 3600,
     stagedDriveItemId: staged.id,
   };

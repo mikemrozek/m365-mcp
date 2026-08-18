@@ -136,6 +136,36 @@ describe('get-file routing', () => {
     expect(payload.content).toBeUndefined();
   });
 
+  it('does not $select the download URL away, and never claims url without one', async () => {
+    // Regression, reported from production 2026-08-17: @microsoft.graph.downloadUrl
+    // is an OData ANNOTATION, not a selectable property. $select-ing it suppresses
+    // it, so the call succeeded and returned delivery:'url' with no url in the
+    // payload — JSON.stringify drops undefined keys, so the field vanished silently.
+    makeRequest.mockResolvedValueOnce({ name: 'doc.pdf', size: 900000, file: { mimeType: 'application/pdf' } });
+    makeRequest.mockResolvedValueOnce({
+      id: 'd1',
+      '@microsoft.graph.downloadUrl': 'https://tenant.example/real',
+    });
+
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { itemId: 'd1' });
+
+    expect(payload.delivery).toBe('url');
+    expect(payload.downloadUrl).toBe('https://tenant.example/real');
+
+    // The item fetch must not carry a $select, or Graph withholds the annotation.
+    const itemFetch = makeRequest.mock.calls[1][0] as string;
+    expect(itemFetch).not.toMatch(/\$select/);
+  });
+
+  it('fails loudly rather than returning a url delivery with no url', async () => {
+    makeRequest.mockResolvedValueOnce({ name: 'weird.dat', size: 900000, file: {} });
+    makeRequest.mockResolvedValueOnce({ id: 'd1' }); // Graph gave us nothing usable
+
+    const { handlers } = harness(client());
+    await expect(call(handlers, 'get-file', { itemId: 'd1' })).rejects.toThrow(/no download URL/i);
+  });
+
   it('returns a genuinely tiny text file inline, since a link would cost more', async () => {
     makeRequest.mockResolvedValueOnce({ name: 'notes.txt', size: 12, file: { mimeType: 'text/plain' } });
     fetchBinary.mockResolvedValueOnce({ buffer: Buffer.from('hello world!'), contentType: 'text/plain' });
