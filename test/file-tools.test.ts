@@ -275,6 +275,113 @@ describe('get-file routing', () => {
   });
 });
 
+describe('url response shape (consistency across branches)', () => {
+  let makeRequest: ReturnType<typeof vi.fn>;
+  let fetchBinary: ReturnType<typeof vi.fn>;
+  let putBinary: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    makeRequest = vi.fn();
+    fetchBinary = vi.fn();
+    putBinary = vi.fn();
+  });
+  const client = () => ({ makeRequest, fetchBinary, putBinary }) as unknown as Partial<GraphClient>;
+
+  it('both branches report `bytes`, so a caller can verify either', async () => {
+    // Drive branch.
+    makeRequest.mockResolvedValueOnce({ name: 'a.pdf', size: 900000, file: { mimeType: 'application/pdf' } });
+    makeRequest.mockResolvedValueOnce({ id: 'd1', '@microsoft.graph.downloadUrl': 'https://t/x' });
+    let h = harness(client()).handlers;
+    const drive = (await call(h, 'get-file', { itemId: 'd1' })).payload;
+    expect(drive.bytes).toBe(900000);
+    expect(drive.integrity).toMatch(/pass-through/i);
+    expect(drive.sha256).toBeUndefined();
+
+    // Staged mail branch.
+    makeRequest = vi.fn();
+    fetchBinary = vi.fn();
+    putBinary = vi.fn();
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'b.png', size: 5165, contentType: 'image/png',
+    });
+    makeRequest.mockResolvedValueOnce({ value: [] });          // prune listing
+    fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(5000), contentType: 'image/png' });
+    putBinary.mockResolvedValueOnce({ id: 's1', '@microsoft.graph.downloadUrl': 'https://t/y' });
+    h = harness(client()).handlers;
+    const mail = (await call(h, 'get-file', { messageId: 'm', attachmentId: 'a' })).payload;
+
+    expect(mail.bytes).toBe(5000);
+    expect(mail.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(mail.integrity).toMatch(/sha256/i);
+  });
+
+  it("surfaces Graph's inflated size ONLY when it disagrees with the real file", async () => {
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'b.png', size: 5165, contentType: 'image/png',   // MIME-inflated
+    });
+    makeRequest.mockResolvedValueOnce({ value: [] });
+    fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(5000), contentType: 'image/png' });
+    putBinary.mockResolvedValueOnce({ id: 's1', '@microsoft.graph.downloadUrl': 'https://t/y' });
+
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { messageId: 'm', attachmentId: 'a' });
+
+    // 165-byte MIME overhead must be explained, not left to look like corruption.
+    expect(payload.graphReportedSize).toBe(5165);
+    expect(payload.sizeNote).toMatch(/MIME/i);
+  });
+
+  it('stays quiet about size when the two agree', async () => {
+    makeRequest.mockResolvedValueOnce({ name: 'a.pdf', size: 900000, file: { mimeType: 'application/pdf' } });
+    makeRequest.mockResolvedValueOnce({ id: 'd1', '@microsoft.graph.downloadUrl': 'https://t/x' });
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { itemId: 'd1' });
+    expect(payload.graphReportedSize).toBeUndefined();
+    expect(payload.sizeNote).toBeUndefined();
+  });
+
+  it('prunes staged copies older than 24h before adding another', async () => {
+    const old = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+    const fresh = new Date().toISOString();
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'c.png', size: 100, contentType: 'image/png',
+    });
+    makeRequest.mockResolvedValueOnce({
+      value: [
+        { id: 'stale1', name: 'old.pdf', createdDateTime: old },
+        { id: 'keep1', name: 'new.pdf', createdDateTime: fresh },
+      ],
+    });
+    makeRequest.mockResolvedValue({});                        // the DELETE
+    fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(100), contentType: 'image/png' });
+    putBinary.mockResolvedValueOnce({ id: 's2', '@microsoft.graph.downloadUrl': 'https://t/z' });
+
+    const { handlers } = harness(client());
+    await call(handlers, 'get-file', { messageId: 'm', attachmentId: 'a' });
+
+    const deletes = makeRequest.mock.calls.filter((c) => c[1]?.method === 'DELETE');
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0][0]).toContain('stale1');   // the fresh one survives
+  });
+
+  it('still returns the file if pruning fails', async () => {
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'd.png', size: 100, contentType: 'image/png',
+    });
+    makeRequest.mockRejectedValueOnce(new Error('folder not found'));   // prune blows up
+    fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(100), contentType: 'image/png' });
+    putBinary.mockResolvedValueOnce({ id: 's3', '@microsoft.graph.downloadUrl': 'https://t/w' });
+
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', { messageId: 'm', attachmentId: 'a' });
+    expect(payload.downloadUrl).toBe('https://t/w');   // housekeeping must not break the request
+  });
+});
+
 describe('attach-file size routing', () => {
   let makeRequest: ReturnType<typeof vi.fn>;
   let fetchBinary: ReturnType<typeof vi.fn>;

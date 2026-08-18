@@ -377,15 +377,26 @@ export function registerFileTools(
           }
 
           const url = await deliverUrl(graphClient, source, filename, contentType, size);
+          // `bytes` is the truth and is always present. Graph's own figure is
+          // surfaced ONLY when it disagrees — for mail attachments it includes
+          // MIME overhead (~165 bytes) and quietly differs from the real file,
+          // which reads as corruption to anyone comparing sizes.
+          const actualBytes = (url as { bytes?: number }).bytes;
+          const graphDisagrees = typeof actualBytes === 'number' && actualBytes !== size;
           return jsonResult({
             delivery: 'url',
             name: filename,
-            // Graph's reported size. For mail attachments this includes MIME
-            // overhead and will exceed the actual file — compare `bytes` (and
-            // the sha256) when verifying a download, never this.
-            reportedSize: size,
             contentType,
             ...url,
+            ...(graphDisagrees
+              ? {
+                  graphReportedSize: size,
+                  sizeNote:
+                    `Graph reports ${size} bytes, the file is ${actualBytes}. The difference is ` +
+                    `MIME envelope overhead in Graph's metadata, not corruption. Verify against ` +
+                    `bytes and sha256.`,
+                }
+              : {}),
             note:
               'Download link, valid roughly one hour, no auth header needed. Fetch it and do ' +
               "whatever you need with the file. If you want the document's prose instead, call " +
@@ -541,6 +552,50 @@ export function registerFileTools(
 }
 
 /**
+ * Deletes staged copies older than the retention window.
+ *
+ * Staging writes a second copy of the file into the user's own OneDrive so a
+ * mail attachment can borrow a download URL. Nothing ever removed them, so the
+ * folder grew without bound — confirmed in production 2026-08-17, where the same
+ * 5.5 MB file appeared twice from two separate calls. That is both a quota
+ * problem and a data-exposure one: copies of potentially sensitive attachments
+ * accumulate outside the mailbox, under different retention and DLP treatment.
+ *
+ * Links expire in about an hour, so anything past a day is certainly dead.
+ * Best-effort by design: pruning must never fail the caller's actual request,
+ * so every error here is swallowed and logged.
+ */
+const STAGING_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+async function pruneStagingFolder(graphClient: GraphClient): Promise<void> {
+  try {
+    const listing = (await graphClient.makeRequest(
+      `/me/drive/root:/${STAGING_FOLDER}:/children?$select=id,name,createdDateTime&$top=200`
+    )) as { value?: Array<{ id?: string; name?: string; createdDateTime?: string }> };
+
+    const cutoff = Date.now() - STAGING_RETENTION_MS;
+    const stale = (listing?.value ?? []).filter((item) => {
+      const created = Date.parse(item.createdDateTime ?? '');
+      return Number.isFinite(created) && created < cutoff && item.id;
+    });
+
+    for (const item of stale) {
+      try {
+        await graphClient.makeRequest(`/me/drive/items/${item.id}`, { method: 'DELETE' });
+      } catch (error) {
+        logger.warn(`Could not prune staged file ${item.name}: ${(error as Error).message}`);
+      }
+    }
+    if (stale.length) {
+      logger.info(`Pruned ${stale.length} staged file(s) older than 24h`);
+    }
+  } catch (error) {
+    // Folder may not exist yet on first use — not worth surfacing.
+    logger.info(`Staging prune skipped: ${(error as Error).message}`);
+  }
+}
+
+/**
  * Produces a pre-authenticated link for a file we could not deliver as text.
  *
  * Drive items already have one. Mail attachments do not, so a copy is staged
@@ -571,12 +626,28 @@ async function deliverUrl(
           'section, or a file type without downloadable content.'
       );
     }
-    return { downloadUrl, expiresInSeconds: 3600 };
+    // Drive metadata size IS the real byte count (unlike mail attachments, whose
+    // size includes MIME overhead), so it can be reported as `bytes` directly.
+    return {
+      downloadUrl,
+      bytes: size,
+      expiresInSeconds: 3600,
+      // Deliberate asymmetry, stated rather than left to be discovered: this is a
+      // pass-through link, so the server never handles the bytes and cannot hash
+      // them. Staged mail attachments DO get a sha256 because staging streams
+      // them through us anyway. Hashing here would mean downloading the whole
+      // file purely to checksum it, which defeats the point of a link.
+      integrity: 'none — pass-through link; server did not read the bytes',
+    };
   }
 
   if (size > MAX_SIMPLE_UPLOAD_BYTES) {
     throw new Error(`File is ${size} bytes, too large to stage for a download link.`);
   }
+
+  // Clear out expired copies before adding another. Deliberately before rather
+  // than after, so a failure here cannot leave the caller without their file.
+  await pruneStagingFolder(graphClient);
 
   const { buffer } = await graphClient.fetchBinary(source.contentPath);
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -591,7 +662,9 @@ async function deliverUrl(
   if (!downloadUrl && staged.id) {
     // The PUT response often omits the URL; fetch the staged item to get it.
     const fetched = (await graphClient.makeRequest(
-      `/me/drive/items/${staged.id}?$select=id,@microsoft.graph.downloadUrl`
+      // No $select — the downloadUrl annotation is suppressed by it (same trap
+      // that broke the drive-item branch).
+      `/me/drive/items/${staged.id}`
     )) as { '@microsoft.graph.downloadUrl'?: string };
     downloadUrl = fetched['@microsoft.graph.downloadUrl'];
   }
@@ -604,6 +677,7 @@ async function deliverUrl(
     // bytes observed), so the two must be distinguishable or a caller comparing
     // them concludes the transfer was corrupt when it was not.
     bytes: buffer.byteLength,
+    integrity: 'sha256 over the bytes uploaded',
     expiresInSeconds: 3600,
     stagedDriveItemId: staged.id,
   };
