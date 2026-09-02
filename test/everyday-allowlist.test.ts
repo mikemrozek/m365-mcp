@@ -38,12 +38,10 @@ const CUSTOM_TOOLS = [
   'read-onedrive-file-text',
   'get-file',
   'attach-file',
+  'put-file',
 ];
 
-const universe = new Set<string>([
-  ...api.endpoints.map((e) => e.alias as string),
-  ...CUSTOM_TOOLS,
-]);
+const universe = new Set<string>([...api.endpoints.map((e) => e.alias as string), ...CUSTOM_TOOLS]);
 
 describe('Everyday allowlist', () => {
   const everyday = load('everyday.json');
@@ -73,6 +71,7 @@ describe('Everyday allowlist', () => {
       'unsubscribe-from-changes',
       'get-file',
       'attach-file',
+      'put-file',
     ];
     const missing = shipped.filter((t) => !everyday.tools.includes(t));
     expect(missing, `shipped but not advertised: ${missing.join(', ')}`).toEqual([]);
@@ -85,7 +84,12 @@ describe('Everyday allowlist', () => {
   });
 
   it('keeps the four tier allowlists internally valid too', () => {
-    for (const file of ['core.json', 'docs-excel.json', 'collab-admin.json', 'mailbox-calendar.json']) {
+    for (const file of [
+      'core.json',
+      'docs-excel.json',
+      'collab-admin.json',
+      'mailbox-calendar.json',
+    ]) {
       const tier = load(file);
       const phantom = tier.tools.filter((t) => !universe.has(t));
       expect(phantom, `${file} names non-existent tools: ${phantom.join(', ')}`).toEqual([]);

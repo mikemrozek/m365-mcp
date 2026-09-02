@@ -47,6 +47,19 @@ import {
  * budget, which on a small plan can exhaust it in one call.
  */
 
+/**
+ * Ceiling on bytes accepted INLINE on the write side, deliberately the same as the
+ * read side's inline threshold.
+ *
+ * Scott's framing on 2026-09-02: "if it's 20K, who gives a ****" — small files
+ * should just move through the conversation, and only larger ones need a link. The
+ * symmetry is the point: a caller who knows get-file returns bytes under 32 KB can
+ * assume put-file accepts bytes under 32 KB. Above it, base64 costs more context
+ * than the file is worth: 1 MB of base64 is roughly 350,000 tokens, which would
+ * exhaust a small plan's budget in a single call.
+ */
+const INLINE_UPLOAD_MAX_BYTES = 32 * 1024;
+
 /** Ceiling for explicit text extraction; above this a link is the only sane answer. */
 const MAX_EXTRACT_BYTES = 40 * 1024 * 1024;
 
@@ -82,6 +95,28 @@ function jsonResult(payload: unknown, isError = false) {
 function safeStagedName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|]/g, '_');
   return `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${cleaned}`;
+}
+
+/** Strips characters OneDrive rejects, without the collision prefix staging adds. */
+function safeUploadName(name: string): string {
+  return (
+    name
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/^\.+/, '')
+      .trim() || 'upload'
+  );
+}
+
+/** Builds the `root:/folder/file:` addressing Graph uses for path-based drive writes. */
+function drivePath(driveId: string | undefined, folder: string, name: string): string {
+  const base = driveId?.trim() ? `/drives/${encodeURIComponent(driveId.trim())}` : '/me/drive';
+  const segments = folder
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part));
+  segments.push(encodeURIComponent(name));
+  return `${base}/root:/${segments.join('/')}:`;
 }
 
 interface SourceRef {
@@ -167,10 +202,15 @@ export function registerFileTools(
   register('get-file', true, () => {
     server.tool(
       'get-file',
-      'THE tool for getting at a file, whether it is a mail attachment or a OneDrive / ' +
-        'SharePoint document. Use this instead of get-mail-attachment, ' +
-        'download-mail-attachment, read-mail-attachment-text, download-onedrive-file-content ' +
-        'or read-onedrive-file-text — it replaces all of them.\n\n' +
+      // The opening sentence is written for a tool SEARCH, not for a reader. Claude
+      // discovers capabilities by matching a query against names and descriptions,
+      // and this tool lost that race for a month: `download-mail-attachment` carries
+      // the words people type — download, mail, attachment — while `get-file` carries
+      // none of them, so callers kept landing on the superseded tool even though its
+      // own text says to prefer this one. Usage 25 Aug-1 Sep: get-file 11 calls, the
+      // five it replaced 21. Hence the vocabulary below, deliberately front-loaded.
+      'Download, read or open a file — an email attachment, or a document in OneDrive ' +
+        'or SharePoint. Handles PDF, Word, Excel, PowerPoint, images, CSV and text.\n\n' +
         'By default you get a short-lived pre-authenticated DOWNLOAD LINK, and you decide what ' +
         'to do with the file: fetch and parse it, search it, run code over it, or read it. The ' +
         'server does not interpret the file or assume what you wanted.\n\n' +
@@ -407,6 +447,164 @@ export function registerFileTools(
     );
   });
 
+  // --- put-file --------------------------------------------------------------
+  register('put-file', true, () => {
+    server.tool(
+      'put-file',
+      // Written for tool search: upload/send/attach/save are the words a person
+      // types, and the first sentence is what discovery matches on.
+      'Upload or save a file into OneDrive or SharePoint — including a file that exists ' +
+        'only on the local machine and is not yet in Microsoft 365. This is the write-side ' +
+        'counterpart to get-file, and the missing step when someone asks to email a file ' +
+        'they have locally.\n\n' +
+        'Two routes, chosen the same way get-file chooses:\n' +
+        '  • SMALL (under 32KB) — pass the bytes directly as contentBase64. Done in one call.\n' +
+        '  • LARGER — omit contentBase64 and pass sizeBytes. You get back a short-lived ' +
+        'uploadUrl to PUT the bytes to, so the file never passes through this conversation. ' +
+        'The response to the final PUT contains the new item, whose id attach-file accepts.\n\n' +
+        'To email the file: put-file → create-draft-email → attach-file → send-draft-message.',
+      {
+        name: z.string().min(1).describe('Filename including extension, e.g. "Q3 report.pdf".'),
+        contentBase64: z
+          .string()
+          .optional()
+          .describe(
+            'The file itself, base64-encoded. Only for files under 32KB — above that omit ' +
+              'this and pass sizeBytes to get an upload URL instead.'
+          ),
+        sizeBytes: z
+          .number()
+          .optional()
+          .describe('Exact size in bytes. Required when contentBase64 is omitted.'),
+        folderPath: z
+          .string()
+          .optional()
+          .describe(
+            `Destination folder, e.g. "Documents/Reports". Defaults to ${STAGING_FOLDER}, ` +
+              'which is cleaned up automatically after 24 hours — pass a real folder for a ' +
+              'file the user wants to keep.'
+          ),
+        driveId: z
+          .string()
+          .optional()
+          .describe("Target a SharePoint library. Omit for the user's own OneDrive."),
+        conflictBehavior: z
+          .enum(['rename', 'replace', 'fail'])
+          .optional()
+          .describe('What to do if the name is taken. Default: rename.'),
+      },
+      {
+        title: 'put-file',
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: true,
+      },
+      async (params) =>
+        withUsageLog('put-file', async () => {
+          const name = safeUploadName(params.name);
+          const folder = params.folderPath?.trim() || STAGING_FOLDER;
+          const conflict = params.conflictBehavior ?? 'rename';
+          const target = drivePath(params.driveId, folder, name);
+
+          if (params.contentBase64) {
+            let buffer: Buffer;
+            try {
+              buffer = Buffer.from(params.contentBase64, 'base64');
+            } catch {
+              return jsonResult({ error: 'contentBase64 is not valid base64.' }, true);
+            }
+            if (buffer.byteLength === 0) {
+              return jsonResult({ error: 'contentBase64 decoded to zero bytes.' }, true);
+            }
+            if (buffer.byteLength > INLINE_UPLOAD_MAX_BYTES) {
+              return jsonResult(
+                {
+                  error:
+                    `File is ${buffer.byteLength} bytes, over the ${INLINE_UPLOAD_MAX_BYTES}-byte ` +
+                    'inline limit. Call again without contentBase64, passing sizeBytes, and PUT ' +
+                    'the bytes to the uploadUrl you get back.',
+                },
+                true
+              );
+            }
+
+            const item = (await graphClient.makeRequest(
+              `${target}/content?@microsoft.graph.conflictBehavior=${conflict}`,
+              {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: buffer,
+              }
+            )) as { id?: string; name?: string; size?: number; webUrl?: string };
+
+            const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+            logger.info(`put-file: ${name} uploaded inline (${buffer.byteLength} bytes)`);
+            return jsonResult({
+              uploaded: true,
+              route: 'inline',
+              itemId: item?.id,
+              name: item?.name ?? name,
+              bytes: buffer.byteLength,
+              sha256,
+              webUrl: item?.webUrl,
+              folder,
+              next: 'Pass itemId to attach-file to put this on a draft email.',
+            });
+          }
+
+          const size = params.sizeBytes;
+          if (typeof size !== 'number' || size <= 0) {
+            return jsonResult(
+              {
+                error:
+                  'Pass either contentBase64 (files under 32KB) or sizeBytes (anything larger, ' +
+                  'to get an upload URL).',
+              },
+              true
+            );
+          }
+          if (size > MAX_SIMPLE_UPLOAD_BYTES) {
+            return jsonResult(
+              { error: `File is ${size} bytes, beyond the ${MAX_SIMPLE_UPLOAD_BYTES}-byte limit.` },
+              true
+            );
+          }
+
+          const session = (await graphClient.makeRequest(`${target}/createUploadSession`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              item: { '@microsoft.graph.conflictBehavior': conflict, name },
+            }),
+          })) as { uploadUrl?: string; expirationDateTime?: string };
+
+          if (!session?.uploadUrl) {
+            return jsonResult({ error: 'Microsoft did not return an upload URL.' }, true);
+          }
+
+          logger.info(`put-file: upload session opened for ${name} (${size} bytes)`);
+          return jsonResult({
+            uploaded: false,
+            route: 'uploadSession',
+            uploadUrl: session.uploadUrl,
+            expiresAt: session.expirationDateTime,
+            name,
+            bytes: size,
+            folder,
+            howTo:
+              'PUT the bytes to uploadUrl with NO Authorization header — the URL carries its ' +
+              `own. Send Content-Range: bytes 0-${Math.max(size - 1, 0)}/${size} for a single ` +
+              'shot; above ~60MB send sequential chunks that are multiples of 320KB. The final ' +
+              'response body is the created item — take its id and pass that to attach-file.',
+            note:
+              'The URL is short-lived and single-session, and the bytes go straight to Microsoft ' +
+              'rather than through this conversation. Some sandboxes cannot reach the upload ' +
+              'host; if the PUT is refused, that is an environment restriction, not a bad URL.',
+          });
+        })
+    );
+  });
+
   // --- attach-file -----------------------------------------------------------
   register('attach-file', true, () => {
     server.tool(
@@ -433,10 +631,7 @@ export function registerFileTools(
           .string()
           .optional()
           .describe('Source: the message holding an attachment to copy.'),
-        attachmentId: z
-          .string()
-          .optional()
-          .describe('Source: the attachment id to copy.'),
+        attachmentId: z.string().optional().describe('Source: the attachment id to copy.'),
         name: z
           .string()
           .optional()
@@ -651,8 +846,7 @@ async function deliverUrl(
 
   const { buffer } = await graphClient.fetchBinary(source.contentPath);
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
-  const uploadPath =
-    `/me/drive/root:/${STAGING_FOLDER}/${encodeURIComponent(safeStagedName(filename))}:/content`;
+  const uploadPath = `/me/drive/root:/${STAGING_FOLDER}/${encodeURIComponent(safeStagedName(filename))}:/content`;
   const staged = (await graphClient.putBinary(uploadPath, buffer, contentType)) as {
     id?: string;
     '@microsoft.graph.downloadUrl'?: string;

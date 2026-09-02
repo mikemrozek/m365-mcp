@@ -58,6 +58,7 @@ const CUSTOM_TOOLS = [
   'read-onedrive-file-text',
   'get-file',
   'attach-file',
+  'put-file',
 ];
 
 const MOCKED_ENDPOINTS = [

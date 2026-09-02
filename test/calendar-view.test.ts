@@ -152,6 +152,7 @@ describe('Calendar View Tools', () => {
         'read-onedrive-file-text',
         'get-file',
         'attach-file',
+        'put-file',
       ]);
 
       for (const call of mockServer.tool.mock.calls) {

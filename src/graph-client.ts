@@ -44,7 +44,8 @@ export function isBinaryContentType(contentType: string): boolean {
 interface GraphRequestOptions {
   headers?: Record<string, string>;
   method?: string;
-  body?: string;
+  /** Binary is accepted so a file upload does not have to round-trip through base64. */
+  body?: string | Uint8Array;
   rawResponse?: boolean;
   includeHeaders?: boolean;
   excludeResponse?: boolean;
@@ -218,7 +219,9 @@ class GraphClient {
     return fetch(url, {
       method: options.method || 'GET',
       headers,
-      body: options.body,
+      // Cast for the binary case: TS narrows fetch's BodyInit to exclude Uint8Array
+      // under these lib settings, the same reason uploadViaSession casts its chunks.
+      body: options.body as unknown as BodyInit,
     });
   }
 

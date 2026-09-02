@@ -69,8 +69,7 @@ describe('get-file routing', () => {
     putBinary = vi.fn();
   });
 
-  const client = () =>
-    ({ makeRequest, fetchBinary, putBinary }) as unknown as Partial<GraphClient>;
+  const client = () => ({ makeRequest, fetchBinary, putBinary }) as unknown as Partial<GraphClient>;
 
   it('defaults to a LINK, not text — the server does not interpret the file', async () => {
     makeRequest.mockResolvedValueOnce({
@@ -79,7 +78,10 @@ describe('get-file routing', () => {
       size: 5000,
       contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
-    fetchBinary.mockResolvedValue({ buffer: makeDocx('Quarterly revenue was flat'), contentType: '' });
+    fetchBinary.mockResolvedValue({
+      buffer: makeDocx('Quarterly revenue was flat'),
+      contentType: '',
+    });
     putBinary.mockResolvedValueOnce({
       id: 'staged-1',
       '@microsoft.graph.downloadUrl': 'https://tenant.example/staged',
@@ -101,7 +103,10 @@ describe('get-file routing', () => {
       size: 5000,
       contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
-    fetchBinary.mockResolvedValueOnce({ buffer: makeDocx('Quarterly revenue was flat'), contentType: '' });
+    fetchBinary.mockResolvedValueOnce({
+      buffer: makeDocx('Quarterly revenue was flat'),
+      contentType: '',
+    });
 
     const { handlers } = harness(client());
     const { payload } = await call(handlers, 'get-file', {
@@ -141,7 +146,11 @@ describe('get-file routing', () => {
     // is an OData ANNOTATION, not a selectable property. $select-ing it suppresses
     // it, so the call succeeded and returned delivery:'url' with no url in the
     // payload — JSON.stringify drops undefined keys, so the field vanished silently.
-    makeRequest.mockResolvedValueOnce({ name: 'doc.pdf', size: 900000, file: { mimeType: 'application/pdf' } });
+    makeRequest.mockResolvedValueOnce({
+      name: 'doc.pdf',
+      size: 900000,
+      file: { mimeType: 'application/pdf' },
+    });
     makeRequest.mockResolvedValueOnce({
       id: 'd1',
       '@microsoft.graph.downloadUrl': 'https://tenant.example/real',
@@ -167,8 +176,15 @@ describe('get-file routing', () => {
   });
 
   it('returns a genuinely tiny text file inline, since a link would cost more', async () => {
-    makeRequest.mockResolvedValueOnce({ name: 'notes.txt', size: 12, file: { mimeType: 'text/plain' } });
-    fetchBinary.mockResolvedValueOnce({ buffer: Buffer.from('hello world!'), contentType: 'text/plain' });
+    makeRequest.mockResolvedValueOnce({
+      name: 'notes.txt',
+      size: 12,
+      file: { mimeType: 'text/plain' },
+    });
+    fetchBinary.mockResolvedValueOnce({
+      buffer: Buffer.from('hello world!'),
+      contentType: 'text/plain',
+    });
 
     const { handlers } = harness(client());
     const { payload } = await call(handlers, 'get-file', { itemId: 'd1' });
@@ -289,7 +305,11 @@ describe('url response shape (consistency across branches)', () => {
 
   it('both branches report `bytes`, so a caller can verify either', async () => {
     // Drive branch.
-    makeRequest.mockResolvedValueOnce({ name: 'a.pdf', size: 900000, file: { mimeType: 'application/pdf' } });
+    makeRequest.mockResolvedValueOnce({
+      name: 'a.pdf',
+      size: 900000,
+      file: { mimeType: 'application/pdf' },
+    });
     makeRequest.mockResolvedValueOnce({ id: 'd1', '@microsoft.graph.downloadUrl': 'https://t/x' });
     let h = harness(client()).handlers;
     const drive = (await call(h, 'get-file', { itemId: 'd1' })).payload;
@@ -303,9 +323,11 @@ describe('url response shape (consistency across branches)', () => {
     putBinary = vi.fn();
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.fileAttachment',
-      name: 'b.png', size: 5165, contentType: 'image/png',
+      name: 'b.png',
+      size: 5165,
+      contentType: 'image/png',
     });
-    makeRequest.mockResolvedValueOnce({ value: [] });          // prune listing
+    makeRequest.mockResolvedValueOnce({ value: [] }); // prune listing
     fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(5000), contentType: 'image/png' });
     putBinary.mockResolvedValueOnce({ id: 's1', '@microsoft.graph.downloadUrl': 'https://t/y' });
     h = harness(client()).handlers;
@@ -319,7 +341,9 @@ describe('url response shape (consistency across branches)', () => {
   it("surfaces Graph's inflated size ONLY when it disagrees with the real file", async () => {
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.fileAttachment',
-      name: 'b.png', size: 5165, contentType: 'image/png',   // MIME-inflated
+      name: 'b.png',
+      size: 5165,
+      contentType: 'image/png', // MIME-inflated
     });
     makeRequest.mockResolvedValueOnce({ value: [] });
     fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(5000), contentType: 'image/png' });
@@ -334,7 +358,11 @@ describe('url response shape (consistency across branches)', () => {
   });
 
   it('stays quiet about size when the two agree', async () => {
-    makeRequest.mockResolvedValueOnce({ name: 'a.pdf', size: 900000, file: { mimeType: 'application/pdf' } });
+    makeRequest.mockResolvedValueOnce({
+      name: 'a.pdf',
+      size: 900000,
+      file: { mimeType: 'application/pdf' },
+    });
     makeRequest.mockResolvedValueOnce({ id: 'd1', '@microsoft.graph.downloadUrl': 'https://t/x' });
     const { handlers } = harness(client());
     const { payload } = await call(handlers, 'get-file', { itemId: 'd1' });
@@ -347,7 +375,9 @@ describe('url response shape (consistency across branches)', () => {
     const fresh = new Date().toISOString();
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.fileAttachment',
-      name: 'c.png', size: 100, contentType: 'image/png',
+      name: 'c.png',
+      size: 100,
+      contentType: 'image/png',
     });
     makeRequest.mockResolvedValueOnce({
       value: [
@@ -355,7 +385,7 @@ describe('url response shape (consistency across branches)', () => {
         { id: 'keep1', name: 'new.pdf', createdDateTime: fresh },
       ],
     });
-    makeRequest.mockResolvedValue({});                        // the DELETE
+    makeRequest.mockResolvedValue({}); // the DELETE
     fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(100), contentType: 'image/png' });
     putBinary.mockResolvedValueOnce({ id: 's2', '@microsoft.graph.downloadUrl': 'https://t/z' });
 
@@ -364,21 +394,23 @@ describe('url response shape (consistency across branches)', () => {
 
     const deletes = makeRequest.mock.calls.filter((c) => c[1]?.method === 'DELETE');
     expect(deletes).toHaveLength(1);
-    expect(deletes[0][0]).toContain('stale1');   // the fresh one survives
+    expect(deletes[0][0]).toContain('stale1'); // the fresh one survives
   });
 
   it('still returns the file if pruning fails', async () => {
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.fileAttachment',
-      name: 'd.png', size: 100, contentType: 'image/png',
+      name: 'd.png',
+      size: 100,
+      contentType: 'image/png',
     });
-    makeRequest.mockRejectedValueOnce(new Error('folder not found'));   // prune blows up
+    makeRequest.mockRejectedValueOnce(new Error('folder not found')); // prune blows up
     fetchBinary.mockResolvedValue({ buffer: Buffer.alloc(100), contentType: 'image/png' });
     putBinary.mockResolvedValueOnce({ id: 's3', '@microsoft.graph.downloadUrl': 'https://t/w' });
 
     const { handlers } = harness(client());
     const { payload } = await call(handlers, 'get-file', { messageId: 'm', attachmentId: 'a' });
-    expect(payload.downloadUrl).toBe('https://t/w');   // housekeeping must not break the request
+    expect(payload.downloadUrl).toBe('https://t/w'); // housekeeping must not break the request
   });
 });
 
@@ -484,7 +516,117 @@ describe('read-only mode', () => {
       skip: (n) => skipped.push(n),
     });
 
-    expect(skipped.sort()).toEqual(['attach-file', 'get-file']);
+    expect(skipped.sort()).toEqual(['attach-file', 'get-file', 'put-file']);
     expect(Object.keys(handlers)).toHaveLength(0);
+  });
+});
+
+describe('put-file — the write side', () => {
+  let makeRequest: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    makeRequest = vi.fn();
+  });
+
+  const client = () => ({ makeRequest }) as unknown as Partial<GraphClient>;
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+
+  it('uploads a small file inline and returns an id attach-file can use', async () => {
+    makeRequest.mockResolvedValueOnce({
+      id: 'item-1',
+      name: 'note.txt',
+      webUrl: 'https://tenant.example/note.txt',
+    });
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'put-file', {
+      name: 'note.txt',
+      contentBase64: b64('hello'),
+    });
+
+    expect(payload.uploaded).toBe(true);
+    expect(payload.route).toBe('inline');
+    expect(payload.itemId).toBe('item-1');
+    expect(payload.bytes).toBe(5);
+    // The caller has to be able to verify the bytes that landed.
+    expect(payload.sha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const [endpoint, options] = makeRequest.mock.calls[0];
+    expect(endpoint).toContain('/content');
+    expect(options.method).toBe('PUT');
+    expect(Buffer.isBuffer(options.body)).toBe(true);
+  });
+
+  it('refuses base64 above the inline ceiling and names the alternative', async () => {
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'put-file', {
+      name: 'big.bin',
+      contentBase64: Buffer.alloc(33 * 1024, 1).toString('base64'),
+    });
+
+    expect(isError).toBe(true);
+    expect(payload.error).toContain('sizeBytes');
+    expect(makeRequest).not.toHaveBeenCalled();
+  });
+
+  it('returns an upload URL instead of moving bytes when no content is passed', async () => {
+    makeRequest.mockResolvedValueOnce({
+      uploadUrl: 'https://tenant.up.example/session',
+      expirationDateTime: '2026-09-02T18:00:00Z',
+    });
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'put-file', {
+      name: 'deck.pptx',
+      sizeBytes: 9_000_000,
+    });
+
+    expect(payload.uploaded).toBe(false);
+    expect(payload.route).toBe('uploadSession');
+    expect(payload.uploadUrl).toBe('https://tenant.up.example/session');
+    expect(payload.howTo).toContain('NO Authorization header');
+    expect(payload.howTo).toContain('bytes 0-8999999/9000000');
+    expect(makeRequest.mock.calls[0][0]).toContain('createUploadSession');
+  });
+
+  it('asks for one of the two inputs rather than guessing', async () => {
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'put-file', { name: 'mystery.bin' });
+    expect(isError).toBe(true);
+    expect(payload.error).toContain('contentBase64');
+    expect(makeRequest).not.toHaveBeenCalled();
+  });
+
+  it('defaults to the self-pruning staging folder, and honours an explicit one', async () => {
+    makeRequest.mockResolvedValue({ id: 'x' });
+    const { handlers } = harness(client());
+
+    await call(handlers, 'put-file', { name: 'a.txt', contentBase64: b64('a') });
+    expect(makeRequest.mock.calls[0][0]).toContain('TSQ-M365-MCP-staging');
+
+    makeRequest.mockClear();
+    await call(handlers, 'put-file', {
+      name: 'a.txt',
+      contentBase64: b64('a'),
+      folderPath: 'Documents/Reports',
+    });
+    expect(makeRequest.mock.calls[0][0]).toContain('Documents/Reports');
+  });
+
+  it('sanitises a filename that OneDrive would reject', async () => {
+    makeRequest.mockResolvedValue({ id: 'x' });
+    const { handlers } = harness(client());
+    await call(handlers, 'put-file', { name: 'in/valid:name?.txt', contentBase64: b64('a') });
+    const endpoint = makeRequest.mock.calls[0][0] as string;
+    expect(endpoint).not.toContain('in/valid');
+    expect(decodeURIComponent(endpoint)).toContain('in_valid_name_.txt');
+  });
+
+  it('rejects a file beyond what a single drive upload supports', async () => {
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'put-file', {
+      name: 'huge.iso',
+      sizeBytes: 300 * 1024 * 1024,
+    });
+    expect(isError).toBe(true);
+    expect(payload.error).toContain('beyond');
   });
 });

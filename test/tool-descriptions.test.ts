@@ -75,7 +75,7 @@ async function registerAllowlistedTools(): Promise<{ name: string; description: 
 describe('advertised tool descriptions', () => {
   it('registers the whole everyday allowlist', async () => {
     const tools = await registerAllowlistedTools();
-    expect(tools.length).toBe(128);
+    expect(tools.length).toBe(124);
   });
 
   it('never opens with prose describing a different operation', async () => {
