@@ -32,6 +32,19 @@ export function actorFromToken(token: string): RequestActor | undefined {
   return actor.oid || actor.upn ? actor : undefined;
 }
 
+/**
+ * Pull the tenant id (`tid`) from an access token, independently of whether the
+ * token also carries user claims. Kept separate from `actorFromToken`, which
+ * intentionally returns nothing for a token with no `oid`/`upn` — the tenant is
+ * needed even then, by callers that must decide whether to trust the caller's
+ * home tenant at all.
+ */
+export function tenantFromToken(token: string): string | undefined {
+  const payload = decodeJwtPayload(token);
+  const tid = payload?.tid;
+  return typeof tid === 'string' && tid.trim() ? tid.trim() : undefined;
+}
+
 function buildWwwAuthenticate(req: Request, error: string, description: string): string {
   const protocol = req.secure ? 'https' : 'http';
   const origin = `${protocol}://${req.get('host')}`;
