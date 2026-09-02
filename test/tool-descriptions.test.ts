@@ -75,7 +75,7 @@ async function registerAllowlistedTools(): Promise<{ name: string; description: 
 describe('advertised tool descriptions', () => {
   it('registers the whole everyday allowlist', async () => {
     const tools = await registerAllowlistedTools();
-    expect(tools.length).toBe(136);
+    expect(tools.length).toBe(128);
   });
 
   it('never opens with prose describing a different operation', async () => {
@@ -112,7 +112,7 @@ describe('advertised tool descriptions', () => {
       'list-mail-messages',
       'delete-mail-message',
       'create-draft-email',
-      'set-chat-message-reaction',
+      'insert-excel-range',
     ];
     for (const name of rewritten) {
       const tool = tools.find((t) => t.name === name);
