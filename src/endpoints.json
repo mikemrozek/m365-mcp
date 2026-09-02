@@ -4,7 +4,8 @@
     "method": "get",
     "toolName": "list-mail-messages",
     "scopes": ["Mail.Read"],
-    "llmTip": "CRITICAL: When searching emails, the $search parameter value MUST be wrapped in double quotes. Format: $search=\"your search query here\". Use KQL (Keyword Query Language) syntax to search specific properties: 'from:', 'subject:', 'body:', 'to:', 'cc:', 'bcc:', 'attachment:', 'hasAttachments:', 'importance:', 'received:', 'sent:'. Examples: $search=\"from:john@example.com\" | $search=\"subject:meeting AND hasAttachments:true\" | $search=\"body:urgent AND received>=2024-01-01\" | $search=\"from:john AND importance:high\". Remember: ALWAYS wrap the entire search expression in double quotes! Reference: https://learn.microsoft.com/en-us/graph/search-query-parameter IMPORTANT: Always use $select to limit returned fields and reduce response size. Recommended default: $select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments. Use bodyPreview instead of body for listings. To read the full email body, use get-mail-message with the specific message id."
+    "llmTip": "CRITICAL: When searching emails, the $search parameter value MUST be wrapped in double quotes. Format: $search=\"your search query here\". Use KQL (Keyword Query Language) syntax to search specific properties: 'from:', 'subject:', 'body:', 'to:', 'cc:', 'bcc:', 'attachment:', 'hasAttachments:', 'importance:', 'received:', 'sent:'. Examples: $search=\"from:john@example.com\" | $search=\"subject:meeting AND hasAttachments:true\" | $search=\"body:urgent AND received>=2024-01-01\" | $search=\"from:john AND importance:high\". Remember: ALWAYS wrap the entire search expression in double quotes! Reference: https://learn.microsoft.com/en-us/graph/search-query-parameter IMPORTANT: Always use $select to limit returned fields and reduce response size. Recommended default: $select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments. Use bodyPreview instead of body for listings. To read the full email body, use get-mail-message with the specific message id.",
+    "description": "Search or list email in the signed-in user's mailbox. The default tool for finding a message by sender, subject, date, keyword or unread state."
   },
   {
     "pathPattern": "/me/mailFolders",
@@ -23,21 +24,24 @@
     "method": "post",
     "toolName": "create-mail-folder",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Creates a top-level mail folder. Use create-mail-child-folder to create a subfolder inside an existing folder. Use list-mail-folders to find existing folder IDs."
+    "llmTip": "Creates a top-level mail folder. Use create-mail-child-folder to create a subfolder inside an existing folder. Use list-mail-folders to find existing folder IDs.",
+    "compactBody": "{ displayName: 'Invoices' } — the folder name, created under the mailbox root. Optionally isHidden: false."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}/childFolders",
     "method": "post",
     "toolName": "create-mail-child-folder",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Creates a subfolder inside an existing mail folder. Use list-mail-folders or list-mail-child-folders to find the parent folder ID."
+    "llmTip": "Creates a subfolder inside an existing mail folder. Use list-mail-folders or list-mail-child-folders to find the parent folder ID.",
+    "compactBody": "{ displayName: 'Q3' } — the folder name, created inside the parent folder given in the path."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}",
     "method": "patch",
     "toolName": "update-mail-folder",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Renames a mail folder by updating its displayName. Use list-mail-folders to find the folder ID."
+    "llmTip": "Renames a mail folder by updating its displayName. Use list-mail-folders to find the folder ID.",
+    "compactBody": "{ displayName: 'New name' } — renaming is the only common change."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}",
@@ -57,7 +61,8 @@
     "pathPattern": "/me/messages/{message-id}",
     "method": "get",
     "toolName": "get-mail-message",
-    "scopes": ["Mail.Read"]
+    "scopes": ["Mail.Read"],
+    "description": "Get one email message by id — full body, sender, recipients, attachment list and headers. Use list-mail-attachments then get-file to read what is attached."
   },
   {
     "pathPattern": "/me/sendMail",
@@ -71,7 +76,8 @@
     "method": "get",
     "toolName": "list-shared-mailbox-messages",
     "workScopes": ["Mail.Read.Shared"],
-    "llmTip": "CRITICAL: When searching emails, the $search parameter value MUST be wrapped in double quotes. Format: $search=\"your search query here\". Use KQL (Keyword Query Language) syntax to search specific properties: 'from:', 'subject:', 'body:', 'to:', 'cc:', 'bcc:', 'attachment:', 'hasAttachments:', 'importance:', 'received:', 'sent:'. Examples: $search=\"from:john@example.com\" | $search=\"subject:meeting AND hasAttachments:true\" | $search=\"body:urgent AND received>=2024-01-01\" | $search=\"from:alice AND importance:high\". Remember: ALWAYS wrap the entire search expression in double quotes! Reference: https://learn.microsoft.com/en-us/graph/search-query-parameter IMPORTANT: Always use $select to limit returned fields and reduce response size. Recommended default: $select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments. Use bodyPreview instead of body for listings. To read the full email body, use get-shared-mailbox-message with the specific message id."
+    "llmTip": "CRITICAL: When searching emails, the $search parameter value MUST be wrapped in double quotes. Format: $search=\"your search query here\". Use KQL (Keyword Query Language) syntax to search specific properties: 'from:', 'subject:', 'body:', 'to:', 'cc:', 'bcc:', 'attachment:', 'hasAttachments:', 'importance:', 'received:', 'sent:'. Examples: $search=\"from:john@example.com\" | $search=\"subject:meeting AND hasAttachments:true\" | $search=\"body:urgent AND received>=2024-01-01\" | $search=\"from:alice AND importance:high\". Remember: ALWAYS wrap the entire search expression in double quotes! Reference: https://learn.microsoft.com/en-us/graph/search-query-parameter IMPORTANT: Always use $select to limit returned fields and reduce response size. Recommended default: $select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments. Use bodyPreview instead of body for listings. To read the full email body, use get-shared-mailbox-message with the specific message id.",
+    "description": "Search or list email in a shared mailbox, or in another person's mailbox the signed-in user has been granted access to."
   },
   {
     "pathPattern": "/users/{user-id}/mailFolders/{mailFolder-id}/messages",
@@ -84,14 +90,16 @@
     "pathPattern": "/users/{user-id}/messages/{message-id}",
     "method": "get",
     "toolName": "get-shared-mailbox-message",
-    "workScopes": ["Mail.Read.Shared"]
+    "workScopes": ["Mail.Read.Shared"],
+    "description": "Get one email by id from a shared mailbox or another person's mailbox."
   },
   {
     "pathPattern": "/users/{user-id}/sendMail",
     "method": "post",
     "toolName": "send-shared-mailbox-mail",
     "workScopes": ["Mail.Send.Shared"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients.",
+    "compactBody": "{ message: { subject, body: { contentType: 'HTML', content }, toRecipients: [{ emailAddress: { address } }], ccRecipients: [...] }, saveToSentItems: true }. Sends as the mailbox named in the path, not as the signed-in user."
   },
   {
     "pathPattern": "/users",
@@ -104,14 +112,16 @@
     "pathPattern": "/me/messages",
     "method": "post",
     "toolName": "create-draft-email",
-    "scopes": ["Mail.ReadWrite"]
+    "scopes": ["Mail.ReadWrite"],
+    "description": "Compose a new email as a draft without sending it. Flow: create-draft-email → attach-file (optional) → send-draft-message."
   },
   {
     "pathPattern": "/me/messages/{message-id}",
     "method": "delete",
     "toolName": "delete-mail-message",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Soft delete — moves the message to Deleted Items. IMPORTANT: moving changes the message id, so calling this again with the SAME id fails with 404 ErrorItemNotFound. Do not retry a delete that appears to have failed — check Deleted Items first, because the first call usually succeeded. To permanently delete, list the item in Deleted Items (list-mail-folder-messages with mailFolder-id 'deleteditems') to get its NEW id, then delete that id."
+    "llmTip": "Soft delete — moves the message to Deleted Items. IMPORTANT: moving changes the message id, so calling this again with the SAME id fails with 404 ErrorItemNotFound. Do not retry a delete that appears to have failed — check Deleted Items first, because the first call usually succeeded. To permanently delete, list the item in Deleted Items (list-mail-folder-messages with mailFolder-id 'deleteditems') to get its NEW id, then delete that id.",
+    "description": "Delete an email, moving it to Deleted Items."
   },
   {
     "pathPattern": "/me/messages/{message-id}/move",
@@ -124,7 +134,8 @@
     "pathPattern": "/me/messages/{message-id}",
     "method": "patch",
     "toolName": "update-mail-message",
-    "scopes": ["Mail.ReadWrite"]
+    "scopes": ["Mail.ReadWrite"],
+    "description": "Update an email in place: mark it read or unread, flag or unflag it, change categories, or edit the body or recipients of an unsent draft."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments",
@@ -164,42 +175,48 @@
     "method": "post",
     "toolName": "forward-mail-message",
     "scopes": ["Mail.Send"],
-    "llmTip": "Forward an email preserving full HTML formatting and attachments. The 'comment' field adds text above the forwarded content. toRecipients is required. Do NOT reconstruct the email manually - this endpoint handles everything server-side."
+    "llmTip": "Forward an email preserving full HTML formatting and attachments. The 'comment' field adds text above the forwarded content. toRecipients is required. Do NOT reconstruct the email manually - this endpoint handles everything server-side.",
+    "compactBody": "{ toRecipients: [{ emailAddress: { address: 'someone@example.com' } }], comment: 'Optional note added above the forwarded message' }. toRecipients is required. Resolve addresses with list-users — never guess them."
   },
   {
     "pathPattern": "/me/messages/{message-id}/reply",
     "method": "post",
     "toolName": "reply-mail-message",
     "scopes": ["Mail.Send"],
-    "llmTip": "Reply to an email preserving full HTML formatting. The 'comment' field is your reply text. Do NOT reconstruct the email manually."
+    "llmTip": "Reply to an email preserving full HTML formatting. The 'comment' field is your reply text. Do NOT reconstruct the email manually.",
+    "compactBody": "{ comment: 'Your reply text' } — HTML is accepted. The original message is quoted automatically. Optionally pass message: { toRecipients: [...] } to change who receives it."
   },
   {
     "pathPattern": "/me/messages/{message-id}/replyAll",
     "method": "post",
     "toolName": "reply-all-mail-message",
     "scopes": ["Mail.Send"],
-    "llmTip": "Reply-all preserving full HTML formatting. The 'comment' field is your reply text."
+    "llmTip": "Reply-all preserving full HTML formatting. The 'comment' field is your reply text.",
+    "compactBody": "{ comment: 'Your reply text' } — HTML is accepted. The original message is quoted automatically. Optionally pass message: { toRecipients: [...] } to change who receives it."
   },
   {
     "pathPattern": "/me/messages/{message-id}/createForward",
     "method": "post",
     "toolName": "create-forward-draft",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Create a forward draft (does not send). Useful when user wants to review before sending."
+    "llmTip": "Create a forward draft (does not send). Useful when user wants to review before sending.",
+    "description": "Forward an email as a draft so the user can review it before it goes out. Use forward-mail-message to forward and send in one step."
   },
   {
     "pathPattern": "/me/messages/{message-id}/createReply",
     "method": "post",
     "toolName": "create-reply-draft",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "For HTML replies pass Message.body.contentType: 'html' with Message.body.content as HTML. Note: supplying Message.body replaces the whole draft body, so the original quoted history is not included. Specifying both 'comment' and Message.body returns 400. Signatures are added by the Outlook client only, not via Graph."
+    "llmTip": "For HTML replies pass Message.body.contentType: 'html' with Message.body.content as HTML. Note: supplying Message.body replaces the whole draft body, so the original quoted history is not included. Specifying both 'comment' and Message.body returns 400. Signatures are added by the Outlook client only, not via Graph.",
+    "compactBody": "{ comment: 'Your reply text' } — HTML is accepted. The original message is quoted automatically. Optionally pass message: { toRecipients: [...] } to change who receives it. Creates the draft only; send it with send-draft-message."
   },
   {
     "pathPattern": "/me/messages/{message-id}/createReplyAll",
     "method": "post",
     "toolName": "create-reply-all-draft",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "For HTML replies pass Message.body.contentType: 'html' with Message.body.content as HTML. Note: supplying Message.body replaces the whole draft body, so the original quoted history is not included. Specifying both 'comment' and Message.body returns 400. Signatures are added by the Outlook client only, not via Graph."
+    "llmTip": "For HTML replies pass Message.body.contentType: 'html' with Message.body.content as HTML. Note: supplying Message.body replaces the whole draft body, so the original quoted history is not included. Specifying both 'comment' and Message.body returns 400. Signatures are added by the Outlook client only, not via Graph.",
+    "compactBody": "{ comment: 'Your reply text' } — HTML is accepted. The original message is quoted automatically. Optionally pass message: { toRecipients: [...] } to change who receives it. Creates the draft only; send it with send-draft-message."
   },
   {
     "pathPattern": "/me/messages/{message-id}/send",
@@ -220,14 +237,16 @@
     "method": "post",
     "toolName": "create-mail-rule",
     "scopes": ["MailboxSettings.ReadWrite"],
-    "llmTip": "Creates a message rule for a mail folder. Use the Inbox folder ID (get it from list-mail-folders) for inbox rules. Body: { displayName: 'Rule name', sequence: 1, isEnabled: true, conditions: { fromAddresses: [{ emailAddress: { address: 'user@example.com' } }] }, actions: { moveToFolder: 'folder-id' } }. Actions: moveToFolder, copyToFolder, forwardTo, forwardAsAttachmentTo, delete, markAsRead, markImportance, stopProcessingRules."
+    "llmTip": "Creates a message rule for a mail folder. Use the Inbox folder ID (get it from list-mail-folders) for inbox rules. Body: { displayName: 'Rule name', sequence: 1, isEnabled: true, conditions: { fromAddresses: [{ emailAddress: { address: 'user@example.com' } }] }, actions: { moveToFolder: 'folder-id' } }. Actions: moveToFolder, copyToFolder, forwardTo, forwardAsAttachmentTo, delete, markAsRead, markImportance, stopProcessingRules.",
+    "compactBody": "{ displayName: 'Rule name', sequence: 1, isEnabled: true, conditions: { senderContains: ['...'], subjectContains: ['...'] }, actions: { moveToFolder: '<folderId>', markAsRead: true, stopProcessingRules: true } }. Rules persist after the conversation ends and are invisible unless the user opens their rule list, so confirm the intent before creating one — and never add a forwarding or redirect action unless the user has asked for it explicitly."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}/messageRules/{messageRule-id}",
     "method": "patch",
     "toolName": "update-mail-rule",
     "scopes": ["MailboxSettings.ReadWrite"],
-    "llmTip": "Updates an existing message rule. Use the Inbox folder ID (get it from list-mail-folders) for inbox rules. Send only the properties to change. Common use: { isEnabled: false } to disable a rule, or update conditions/actions."
+    "llmTip": "Updates an existing message rule. Use the Inbox folder ID (get it from list-mail-folders) for inbox rules. Send only the properties to change. Common use: { isEnabled: false } to disable a rule, or update conditions/actions.",
+    "compactBody": "Fields to change on an existing rule — same shape as creation. Confirm the intent before changing conditions or actions, and never introduce a forwarding or redirect action the user did not ask for."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}/messageRules/{messageRule-id}",
@@ -258,14 +277,17 @@
     "method": "post",
     "toolName": "create-calendar-event",
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients.",
+    "description": "Create a calendar event or meeting invitation on the signed-in user's default calendar, with attendees, start and end times, location and an optional Teams meeting.",
+    "compactBody": "Event to create. Required: subject, start and end as { dateTime: '2026-09-08T14:00:00', timeZone: 'Eastern Standard Time' }. Common: body { contentType: 'HTML', content }, attendees [{ emailAddress: { address, name }, type: 'required' | 'optional' }], location { displayName }, isOnlineMeeting: true with onlineMeetingProvider: 'teamsForBusiness' for a Teams meeting, recurrence, isAllDay, showAs, categories. Resolve attendee addresses with list-users — never guess them."
   },
   {
     "pathPattern": "/me/events/{event-id}",
     "method": "patch",
     "toolName": "update-calendar-event",
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones.",
+    "compactBody": "Fields to change, and only those — omitted fields are left alone. Same shape as creation: subject, start/end as { dateTime, timeZone }, body, attendees, location, isOnlineMeeting. Changing attendees or times sends updates to everyone invited."
   },
   {
     "pathPattern": "/me/events/{event-id}",
@@ -302,7 +324,8 @@
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
     "supportsExpandExtendedProperties": true,
-    "llmTip": "WARNING: Does NOT expand recurring events — only returns seriesMaster. Use get-specific-calendar-view instead."
+    "llmTip": "WARNING: Does NOT expand recurring events — only returns seriesMaster. Use get-specific-calendar-view instead.",
+    "description": "List events stored in a named (non-default) calendar WITHOUT expanding recurring series — a weekly meeting appears once, not once per week. For 'what is on my calendar', use get-specific-calendar-view instead."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events/{event-id}",
@@ -310,21 +333,24 @@
     "toolName": "get-specific-calendar-event",
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
-    "supportsExpandExtendedProperties": true
+    "supportsExpandExtendedProperties": true,
+    "description": "Get one event by id from a named (non-default) calendar, including attendees, times, location and the Teams join link."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events",
     "method": "post",
     "toolName": "create-specific-calendar-event",
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients.",
+    "compactBody": "Event to create. Required: subject, start and end as { dateTime: '2026-09-08T14:00:00', timeZone: 'Eastern Standard Time' }. Common: body { contentType: 'HTML', content }, attendees [{ emailAddress: { address, name }, type: 'required' | 'optional' }], location { displayName }, isOnlineMeeting: true with onlineMeetingProvider: 'teamsForBusiness' for a Teams meeting, recurrence, isAllDay, showAs, categories. Resolve attendee addresses with list-users — never guess them."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events/{event-id}",
     "method": "patch",
     "toolName": "update-specific-calendar-event",
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones.",
+    "compactBody": "Fields to change, and only those — omitted fields are left alone. Same shape as creation: subject, start/end as { dateTime, timeZone }, body, attendees, location, isOnlineMeeting. Changing attendees or times sends updates to everyone invited."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events/{event-id}",
@@ -349,7 +375,8 @@
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
     "supportsExpandExtendedProperties": true,
-    "llmTip": "Returns expanded recurring event instances (not just seriesMaster) within a date range for a specific calendar. Requires startDateTime and endDateTime query parameters in ISO 8601 format (e.g., 2024-01-01T00:00:00Z). Each instance includes seriesMasterId and type (occurrence/exception) fields for recurring event linkage. Use fetchAllPages=true to retrieve all results when there are many events. To find Teams meetings, do not filter server-side: isOnlineMeeting is not filterable (400 ErrorInvalidProperty) and onlineMeetingProvider returns a 500. Instead $select=isOnlineMeeting,onlineMeeting,onlineMeetingProvider and filter client-side. Teams meetings include a joinWebUrl property needed for transcript access via list-online-meetings."
+    "llmTip": "Returns expanded recurring event instances (not just seriesMaster) within a date range for a specific calendar. Requires startDateTime and endDateTime query parameters in ISO 8601 format (e.g., 2024-01-01T00:00:00Z). Each instance includes seriesMasterId and type (occurrence/exception) fields for recurring event linkage. Use fetchAllPages=true to retrieve all results when there are many events. To find Teams meetings, do not filter server-side: isOnlineMeeting is not filterable (400 ErrorInvalidProperty) and onlineMeetingProvider returns a 500. Instead $select=isOnlineMeeting,onlineMeeting,onlineMeetingProvider and filter client-side. Teams meetings include a joinWebUrl property needed for transcript access via list-online-meetings.",
+    "description": "List what is on a named (non-default) calendar between two dates, with recurring meetings expanded into their individual occurrences. This is the tool for 'what meetings do I have' on a secondary calendar."
   },
   {
     "pathPattern": "/me/calendar/getSchedule",
@@ -362,14 +389,16 @@
     "pathPattern": "/users/{user-id}/calendar/events",
     "method": "get",
     "toolName": "list-shared-calendar-events",
-    "workScopes": ["Calendars.Read.Shared"]
+    "workScopes": ["Calendars.Read.Shared"],
+    "description": "List events on another person's calendar that they have shared with the signed-in user, WITHOUT expanding recurring series. For availability, prefer get-shared-calendar-view or get-schedule."
   },
   {
     "pathPattern": "/users/{user-id}/calendarView",
     "method": "get",
     "toolName": "get-shared-calendar-view",
     "workScopes": ["Calendars.Read.Shared"],
-    "supportsTimezone": true
+    "supportsTimezone": true,
+    "description": "List another person's meetings between two dates, with recurring meetings expanded. Use this to see what someone else has on, when their calendar is shared."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events/{event-id}/instances",
@@ -391,14 +420,16 @@
     "method": "post",
     "toolName": "create-calendar",
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "Creates a new personal calendar. Body: { name: 'My Calendar', color: 'auto' }. Available colors: auto, lightBlue, lightGreen, lightOrange, lightGray, lightYellow, lightTeal, lightPink, lightBrown, lightRed, maxColor."
+    "llmTip": "Creates a new personal calendar. Body: { name: 'My Calendar', color: 'auto' }. Available colors: auto, lightBlue, lightGreen, lightOrange, lightGray, lightYellow, lightTeal, lightPink, lightBrown, lightRed, maxColor.",
+    "compactBody": "{ name: 'Team calendar' } — optionally color: 'auto' | 'lightBlue' | 'lightGreen' | 'lightOrange' | 'lightGray' | 'lightYellow' | 'lightTeal' | 'lightPink' | 'lightBrown' | 'lightRed'."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}",
     "method": "patch",
     "toolName": "update-calendar",
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "Updates a calendar's properties. Body: { name: 'New Name', color: 'lightBlue' }. Cannot update the default calendar's name."
+    "llmTip": "Updates a calendar's properties. Body: { name: 'New Name', color: 'lightBlue' }. Cannot update the default calendar's name.",
+    "compactBody": "{ name: 'New name' } and/or { color: 'lightBlue' }. Only the fields you pass are changed."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}",
@@ -431,13 +462,15 @@
     "pathPattern": "/drives/{drive-id}/root",
     "method": "get",
     "toolName": "get-drive-root-item",
-    "scopes": ["Files.Read"]
+    "scopes": ["Files.Read"],
+    "description": "Get the top-level folder of a OneDrive or SharePoint document library, as the starting point for browsing with list-folder-files."
   },
   {
     "pathPattern": "/drives/{drive-id}/root",
     "method": "get",
     "toolName": "get-drive-root-item",
-    "scopes": ["Files.Read"]
+    "scopes": ["Files.Read"],
+    "description": "Get the top-level folder of a OneDrive or SharePoint document library, as the starting point for browsing with list-folder-files."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/children",
@@ -557,7 +590,8 @@
     "toolName": "get-excel-range",
     "isExcelOp": true,
     "scopes": ["Files.Read"],
-    "skipEncoding": ["address"]
+    "skipEncoding": ["address"],
+    "description": "Read the values, formulas and formatting of a range of cells from an Excel workbook stored in OneDrive or SharePoint."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/range(address='{address}')",
@@ -575,7 +609,8 @@
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
     "skipEncoding": ["address"],
-    "llmTip": "Insert blank cells at the given range, shifting existing content. Body: { shift: 'Down' } or { shift: 'Right' }. Use 'Down' to insert blank rows above existing data."
+    "llmTip": "Insert blank cells at the given range, shifting existing content. Body: { shift: 'Down' } or { shift: 'Right' }. Use 'Down' to insert blank rows above existing data.",
+    "description": "Insert blank cells into an Excel worksheet, shifting existing content down or right to make room."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/range(address='{address}')/delete",
@@ -584,7 +619,8 @@
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
     "skipEncoding": ["address"],
-    "llmTip": "Delete cells at the given range, shifting remaining content. Body: { shift: 'Up' } or { shift: 'Left' }. Use 'Up' to delete entire rows."
+    "llmTip": "Delete cells at the given range, shifting remaining content. Body: { shift: 'Up' } or { shift: 'Left' }. Use 'Up' to delete entire rows.",
+    "description": "Delete cells from an Excel worksheet, shifting the remaining content up or left to close the gap."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/tables/{workbookTable-id}/rows/itemAt(index={index})",
@@ -984,7 +1020,8 @@
     "toolName": "get-user-profile-photo",
     "workScopes": ["User.Read.All"],
     "returnDownloadUrl": true,
-    "llmTip": "Returns a specific user's profile photo as binary image data. Use the user ID or UPN (email)."
+    "llmTip": "Returns a specific user's profile photo as binary image data. Use the user ID or UPN (email).",
+    "description": "Get another person's profile photo from the directory. For the signed-in user's own photo, use get-my-profile-photo."
   },
   {
     "pathPattern": "/me/people",
@@ -1047,7 +1084,8 @@
     "method": "get",
     "toolName": "list-chats",
     "workScopes": ["Chat.Read"],
-    "llmTip": "Lists the signed-in user's Teams chats — one-on-one, group, and meeting chats — with id, chatType, topic, and lastUpdatedDateTime. This is the tool for finding a chatId: use it before list-chat-messages, send-chat-message, or subscribing to a chat. Use $expand=members to see participants. Do NOT pass $orderby — Graph rejects ordering on this collection ('QueryOptions to order by lastUpdatedDateTime is not supported'); fetch the page and sort by lastUpdatedDateTime yourself. Results are paged, so a chat you expect may be on a later page — follow @odata.nextLink before concluding it does not exist. Do not use create-chat to find an existing chat; create-chat starts a new one."
+    "llmTip": "Lists the signed-in user's Teams chats — one-on-one, group, and meeting chats — with id, chatType, topic, and lastUpdatedDateTime. This is the tool for finding a chatId: use it before list-chat-messages, send-chat-message, or subscribing to a chat. Use $expand=members to see participants. Do NOT pass $orderby — Graph rejects ordering on this collection ('QueryOptions to order by lastUpdatedDateTime is not supported'); fetch the page and sort by lastUpdatedDateTime yourself. Results are paged, so a chat you expect may be on a later page — follow @odata.nextLink before concluding it does not exist. Do not use create-chat to find an existing chat; create-chat starts a new one.",
+    "description": "List the signed-in user's Teams chats — one-to-one, group and meeting chats — most recently active first."
   },
   {
     "pathPattern": "/chats/{chat-id}",
@@ -1094,7 +1132,8 @@
     "method": "post",
     "toolName": "send-chat-message",
     "workScopes": ["ChatMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API.",
+    "compactBody": "Message to post. { body: { contentType: 'html', content: '<p>Hello</p>' } }. Prefer html — plain text is often mangled by Graph. To mention someone, put <at id=\"0\">Name</at> in the content and pass mentions: [{ id: 0, mentionText: 'Name', mentioned: { user: { id, displayName } } }]. Attachments and reactions are separate calls."
   },
   {
     "pathPattern": "/me/joinedTeams",
@@ -1170,14 +1209,16 @@
     "method": "post",
     "toolName": "send-channel-message",
     "workScopes": ["ChannelMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API.",
+    "compactBody": "Message to post. { body: { contentType: 'html', content: '<p>Hello</p>' } }. Prefer html — plain text is often mangled by Graph. To mention someone, put <at id=\"0\">Name</at> in the content and pass mentions: [{ id: 0, mentionText: 'Name', mentioned: { user: { id, displayName } } }]. Attachments and reactions are separate calls. A channel post may also carry subject."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
     "method": "post",
     "toolName": "reply-to-channel-message",
     "workScopes": ["ChannelMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API.",
+    "compactBody": "Message to post. { body: { contentType: 'html', content: '<p>Hello</p>' } }. Prefer html — plain text is often mangled by Graph. To mention someone, put <at id=\"0\">Name</at> in the content and pass mentions: [{ id: 0, mentionText: 'Name', mentioned: { user: { id, displayName } } }]. Attachments and reactions are separate calls."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
@@ -1207,13 +1248,15 @@
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/setReaction",
     "method": "post",
     "toolName": "set-channel-message-reaction",
-    "workScopes": ["ChannelMessage.Send"]
+    "workScopes": ["ChannelMessage.Send"],
+    "description": "React to a message in a Teams channel with an emoji."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/unsetReaction",
     "method": "post",
     "toolName": "unset-channel-message-reaction",
-    "workScopes": ["ChannelMessage.Send"]
+    "workScopes": ["ChannelMessage.Send"],
+    "description": "Remove an emoji reaction from a message in a Teams channel."
   },
   {
     "pathPattern": "/teams/{team-id}/members",
@@ -1239,19 +1282,22 @@
     "method": "post",
     "toolName": "reply-to-chat-message",
     "workScopes": ["ChatMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API.",
+    "compactBody": "Message to post. { body: { contentType: 'html', content: '<p>Hello</p>' } }. Prefer html — plain text is often mangled by Graph. To mention someone, put <at id=\"0\">Name</at> in the content and pass mentions: [{ id: 0, mentionText: 'Name', mentioned: { user: { id, displayName } } }]. Attachments and reactions are separate calls."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/setReaction",
     "method": "post",
     "toolName": "set-chat-message-reaction",
-    "workScopes": ["ChatMessage.Send"]
+    "workScopes": ["ChatMessage.Send"],
+    "description": "React to a message in a Teams chat with an emoji."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/unsetReaction",
     "method": "post",
     "toolName": "unset-chat-message-reaction",
-    "workScopes": ["ChatMessage.Send"]
+    "workScopes": ["ChatMessage.Send"],
+    "description": "Remove an emoji reaction from a message in a Teams chat."
   },
   {
     "pathPattern": "/chats/{chat-id}/pinnedMessages",
@@ -1263,7 +1309,8 @@
     "pathPattern": "/chats/{chat-id}/pinnedMessages",
     "method": "post",
     "toolName": "pin-chat-message",
-    "workScopes": ["ChatMessage.Send"]
+    "workScopes": ["ChatMessage.Send"],
+    "compactBody": "{ 'message@odata.bind': 'https://graph.microsoft.com/v1.0/chats/{chatId}/messages/{messageId}' } — the full URL of the message to pin."
   },
   {
     "pathPattern": "/chats/{chat-id}/pinnedMessages/{pinnedChatMessageInfo-id}",
@@ -1358,7 +1405,8 @@
     "pathPattern": "/sites/{site-id}/getByPath(path='{path}')",
     "method": "get",
     "toolName": "get-sharepoint-site-by-path",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "description": "Find a SharePoint site by its URL path, when you know the address but not the site id. To find one by name, use search-sharepoint-sites."
   },
   {
     "pathPattern": "/sites/delta()",
@@ -1380,7 +1428,8 @@
       "Chat.Read",
       "ChannelMessage.Read.All"
     ],
-    "llmTip": "IMPORTANT: Not all entity type combinations work in a single request. Valid combinations: 'message' can only be combined with 'event'. 'driveItem' can be combined with 'listItem' and 'list'. 'chatMessage' must be searched alone. 'person' and 'bookmark' must be searched alone. If you need results from incompatible types, make separate search-query calls for each group. Reference: https://learn.microsoft.com/en-us/graph/search-concept-overview#known-limitations"
+    "llmTip": "IMPORTANT: Not all entity type combinations work in a single request. Valid combinations: 'message' can only be combined with 'event'. 'driveItem' can be combined with 'listItem' and 'list'. 'chatMessage' must be searched alone. 'person' and 'bookmark' must be searched alone. If you need results from incompatible types, make separate search-query calls for each group. Reference: https://learn.microsoft.com/en-us/graph/search-concept-overview#known-limitations",
+    "compactBody": "{ requests: [ { entityTypes: ['message'], query: { queryString: 'KQL, e.g. subject:budget AND received>=2026-08-01' }, from: 0, size: 25 } ] }. entityTypes accepts message, event, driveItem, driveItemVersion, site, list, listItem, chatMessage, person — one kind per request unless Microsoft documents the combination as supported."
   },
   {
     "pathPattern": "/me/onlineMeetings",
@@ -1677,7 +1726,9 @@
     "method": "post",
     "toolName": "create-chat",
     "workScopes": ["Chat.Create", "Chat.ReadWrite"],
-    "llmTip": "Creates a new 1:1 or group Teams chat. Body: { chatType ('oneOnOne' or 'group'), topic (optional, group only), members: [{ '@odata.type': '#microsoft.graph.aadUserConversationMember', roles: ['owner' | 'guest'], 'user@odata.bind': 'https://graph.microsoft.com/v1.0/users({id})' }] }. A oneOnOne chat requires exactly 2 members (self + other), both with role 'owner'. For group chats, include all participants. The signed-in user must be one of the members. Returns the created chat with its id — use that id with send-chat-message, list-chat-members, etc."
+    "llmTip": "Creates a new 1:1 or group Teams chat. Body: { chatType ('oneOnOne' or 'group'), topic (optional, group only), members: [{ '@odata.type': '#microsoft.graph.aadUserConversationMember', roles: ['owner' | 'guest'], 'user@odata.bind': 'https://graph.microsoft.com/v1.0/users({id})' }] }. A oneOnOne chat requires exactly 2 members (self + other), both with role 'owner'. For group chats, include all participants. The signed-in user must be one of the members. Returns the created chat with its id — use that id with send-chat-message, list-chat-members, etc.",
+    "description": "Start a new Teams chat, one-to-one or group, with the people you name. Post into it afterwards with send-chat-message.",
+    "compactBody": "Chat to create. { chatType: 'oneOnOne' | 'group', members: [ { '@odata.type': '#microsoft.graph.aadUserConversationMember', roles: ['owner'], 'user@odata.bind': 'https://graph.microsoft.com/v1.0/users/{userId}' } ] }. Include the signed-in user as a member. A group chat also accepts topic. Resolve user ids with list-users."
   },
   {
     "pathPattern": "/subscriptions",

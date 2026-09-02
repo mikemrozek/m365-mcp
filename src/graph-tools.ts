@@ -35,6 +35,40 @@ interface EndpointConfig {
   supportsTimezone?: boolean;
   supportsExpandExtendedProperties?: boolean;
   llmTip?: string;
+  /**
+   * Replaces the upstream Graph description entirely.
+   *
+   * The generated descriptions are scraped Graph reference prose and a number of
+   * them describe a DIFFERENT operation than the tool performs — `delete-mail-message`
+   * opened with "Delete eventMessage", `list-mail-messages` with "Get an open
+   * extension (openTypeExtension object)". Under eager tool loading that was
+   * survivable, because the model read the whole string and found the tip. Claude
+   * now searches for tools instead of loading them all, and discovery matches on
+   * the opening text — so a first sentence about open extensions means the mail
+   * tool never surfaces for a mail query, and argues against itself when it does.
+   *
+   * Write these as a person would search for them: verb first, then the object, in
+   * the words a user actually types. Disambiguate near neighbours explicitly.
+   */
+  description?: string;
+  /**
+   * Replaces the request-body schema with a permissive object carrying this text.
+   *
+   * The generated client inlines the full Graph entity schema for every write —
+   * `create-chat` expands the entire chat entity, members, every message subtype,
+   * and costs ~7,000 tokens on its own. Measured 2026-09-02: the 24 heaviest tools
+   * carried 62% of the whole 142,000-token catalogue, and the bulk of that is body
+   * schemas nobody needs in full. A model does not need the complete chat entity to
+   * start a chat; it needs to know that chatType and members are required.
+   *
+   * So the body becomes a passthrough object — any shape still reaches Graph, and
+   * Graph remains the validator it always was — described by a short, accurate
+   * sentence naming the required and common fields. That is cheaper AND clearer
+   * than a 200-property schema the model has to infer intent from.
+   *
+   * Write these as a worked example, not a type definition.
+   */
+  compactBody?: string;
   skipEncoding?: string[]; // Parameter names that should NOT be URL-encoded (for function-style API calls)
   contentType?: string;
   acceptType?: string; // Custom Accept header for endpoints returning non-JSON content (e.g., text/vtt)
@@ -644,6 +678,14 @@ export function registerGraphTools(
     const paramSchema: Record<string, z.ZodTypeAny> = {};
     if (tool.parameters && tool.parameters.length > 0) {
       for (const param of tool.parameters) {
+        // A configured compactBody replaces the inlined Graph entity schema; see
+        // EndpointConfig.compactBody. Matched on the parameter's Body type, with a
+        // name fallback so a client-generator change cannot silently disable it.
+        const isBody = param.type === 'Body' || param.name === 'body';
+        if (isBody && endpointConfig?.compactBody) {
+          paramSchema[param.name] = z.object({}).passthrough().describe(endpointConfig.compactBody);
+          continue;
+        }
         paramSchema[param.name] = param.schema || z.any();
       }
     }
@@ -671,11 +713,7 @@ export function registerGraphTools(
     if (tool.method.toUpperCase() === 'GET' && tool.path.includes('/')) {
       paramSchema['fetchAllPages'] = z
         .boolean()
-        .describe(
-          'Follow @odata.nextLink and merge up to 100 pages into one response. ' +
-            'Can return enormous payloads—only when the user explicitly needs a full export. ' +
-            'Prefer a small $top first, then paginate or narrow with $filter/$search.'
-        )
+        .describe('Merge all pages (max 100). Only for a genuine full export.')
         .optional();
     }
 
@@ -684,24 +722,19 @@ export function registerGraphTools(
       const key = paramSchema['$filter'] !== undefined ? '$filter' : 'filter';
       paramSchema[key] = z
         .string()
-        .describe(
-          'OData filter expression. Add $count=true for advanced filters (flag/flagStatus, contains()). Cannot combine with $search.'
-        )
+        .describe('OData filter. Not with search. contains() needs count=true.')
         .optional();
     }
     if (paramSchema['search'] !== undefined || paramSchema['$search'] !== undefined) {
       const key = paramSchema['$search'] !== undefined ? '$search' : 'search';
       paramSchema[key] = z
         .string()
-        .describe('KQL search query — wrap value in double quotes. Cannot combine with $filter.')
+        .describe('KQL query, double-quoted. Not with filter.')
         .optional();
     }
     if (paramSchema['select'] !== undefined || paramSchema['$select'] !== undefined) {
       const key = paramSchema['$select'] !== undefined ? '$select' : 'select';
-      paramSchema[key] = z
-        .string()
-        .describe('Comma-separated fields to return, e.g. id,subject,from,receivedDateTime')
-        .optional();
+      paramSchema[key] = z.string().describe('Fields to return, comma-separated.').optional();
     }
     if (paramSchema['orderby'] !== undefined || paramSchema['$orderby'] !== undefined) {
       const key = paramSchema['$orderby'] !== undefined ? '$orderby' : 'orderby';
@@ -712,29 +745,17 @@ export function registerGraphTools(
     }
     if (paramSchema['top'] !== undefined || paramSchema['$top'] !== undefined) {
       const key = paramSchema['$top'] !== undefined ? '$top' : 'top';
-      paramSchema[key] = z
-        .number()
-        .describe(
-          'Page size (Graph $top). Start small (e.g. 5–15) so responses fit the model context; ' +
-            'raise only if needed. Use $select to return fewer fields per item. ' +
-            'For more rows, use @odata.nextLink from the response instead of a very large $top.'
-        )
-        .optional();
+      paramSchema[key] = z.number().describe('Page size. Start small, 5-15.').optional();
     }
     if (paramSchema['skip'] !== undefined || paramSchema['$skip'] !== undefined) {
       const key = paramSchema['$skip'] !== undefined ? '$skip' : 'skip';
-      paramSchema[key] = z
-        .number()
-        .describe('Items to skip for pagination. Not supported with $search.')
-        .optional();
+      paramSchema[key] = z.number().describe('Items to skip. Not with search.').optional();
     }
     if (paramSchema['count'] !== undefined || paramSchema['$count'] !== undefined) {
       const countKey = paramSchema['$count'] !== undefined ? '$count' : 'count';
       paramSchema[countKey] = z
         .boolean()
-        .describe(
-          'Set true to enable advanced query mode (ConsistencyLevel: eventual). Required for complex $filter on flag/flagStatus or contains().'
-        )
+        .describe('Advanced query mode (ConsistencyLevel: eventual).')
         .optional();
     }
 
@@ -758,13 +779,13 @@ export function registerGraphTools(
     // Add includeHeaders parameter for all tools to capture ETags and other headers
     paramSchema['includeHeaders'] = z
       .boolean()
-      .describe('Include response headers (including ETag) in the response metadata')
+      .describe('Also return response headers, e.g. ETag.')
       .optional();
 
     // Add excludeResponse parameter to only return success/failure indication
     paramSchema['excludeResponse'] = z
       .boolean()
-      .describe('Exclude the full response body and only return success or failure indication')
+      .describe('Return only success or failure, not the body.')
       .optional();
 
     // Add timezone parameter for calendar endpoints that support it
@@ -787,9 +808,13 @@ export function registerGraphTools(
         .optional();
     }
 
-    // Build the tool description, optionally appending LLM tips
+    // Build the tool description, optionally appending LLM tips. A hand-written
+    // `description` in endpoints.json wins over the upstream Graph prose — see
+    // EndpointConfig.description for why that override exists.
     let toolDescription =
-      tool.description || `Execute ${tool.method.toUpperCase()} request to ${tool.path}`;
+      endpointConfig?.description ||
+      tool.description ||
+      `Execute ${tool.method.toUpperCase()} request to ${tool.path}`;
     if (endpointConfig?.llmTip) {
       toolDescription += `\n\n💡 TIP: ${endpointConfig.llmTip}`;
     }
@@ -897,7 +922,7 @@ export function registerGraphTools(
       server.tool(
         'list-conversation-messages',
         'Lists every message in a single email conversation thread by conversationId. ' +
-          "The conversationId is stable across subject line changes — get it from any " +
+          'The conversationId is stable across subject line changes — get it from any ' +
           "message's conversationId field (get-mail-message, list-mail-messages, etc.). " +
           "Backed by /me/messages with $filter=conversationId eq '{id}' (the server adds " +
           'this filter for you, so callers must NOT pass their own filter parameter). ' +
@@ -1176,87 +1201,93 @@ export function registerGraphTools(
         },
         async (params) =>
           withUsageLog('get-messages-batch', async () => {
-          const messageIds = params.messageIds.filter((id) => typeof id === 'string' && id.trim());
-          if (messageIds.length === 0) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({ error: 'messageIds must contain at least one non-empty ID.' }),
-                },
-              ],
-              isError: true,
-            };
-          }
-          if (messageIds.length > 20) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({ error: 'messageIds limited to 20 per call (Graph $batch limit).' }),
-                },
-              ],
-              isError: true,
-            };
-          }
-
-          // Build the per-message URL. Graph $batch URLs are relative to /v1.0 and
-          // may include a query string. encodeURIComponent escapes '=' in message
-          // IDs to %3D — Graph accepts both forms but unescaping keeps logs readable.
-          const selectClause = params.select
-            ? `?$select=${encodeURIComponent(params.select).replace(/%2C/gi, ',')}`
-            : '';
-          const subRequests = messageIds.map((id, idx) => ({
-            id: String(idx + 1),
-            method: 'GET',
-            url: `/me/messages/${encodeURIComponent(id).replace(/%3D/g, '=')}${selectClause}`,
-          }));
-
-          try {
-            const batchResponse = await graphClient.batchRequest(subRequests);
-
-            const results: Array<{ messageId: string; data: unknown }> = [];
-            const failures: Array<{ messageId: string; status: number; error: unknown }> = [];
-
-            for (const subResp of batchResponse.responses ?? []) {
-              const idx = parseInt(subResp.id, 10) - 1;
-              const messageId = messageIds[idx];
-              if (subResp.status >= 200 && subResp.status < 300) {
-                results.push({ messageId, data: subResp.body });
-              } else {
-                failures.push({ messageId, status: subResp.status, error: subResp.body });
-              }
+            const messageIds = params.messageIds.filter(
+              (id) => typeof id === 'string' && id.trim()
+            );
+            if (messageIds.length === 0) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: 'messageIds must contain at least one non-empty ID.',
+                    }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+            if (messageIds.length > 20) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: 'messageIds limited to 20 per call (Graph $batch limit).',
+                    }),
+                  },
+                ],
+                isError: true,
+              };
             }
 
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    results,
-                    failures,
-                    summary: {
-                      total: messageIds.length,
-                      succeeded: results.length,
-                      failed: failures.length,
-                    },
-                  }),
-                },
-              ],
-            };
-          } catch (err) {
-            logger.error(`get-messages-batch failed: ${(err as Error).message}`);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({ error: (err as Error).message }),
-                },
-              ],
-              isError: true,
-            };
-          }
-        })
+            // Build the per-message URL. Graph $batch URLs are relative to /v1.0 and
+            // may include a query string. encodeURIComponent escapes '=' in message
+            // IDs to %3D — Graph accepts both forms but unescaping keeps logs readable.
+            const selectClause = params.select
+              ? `?$select=${encodeURIComponent(params.select).replace(/%2C/gi, ',')}`
+              : '';
+            const subRequests = messageIds.map((id, idx) => ({
+              id: String(idx + 1),
+              method: 'GET',
+              url: `/me/messages/${encodeURIComponent(id).replace(/%3D/g, '=')}${selectClause}`,
+            }));
+
+            try {
+              const batchResponse = await graphClient.batchRequest(subRequests);
+
+              const results: Array<{ messageId: string; data: unknown }> = [];
+              const failures: Array<{ messageId: string; status: number; error: unknown }> = [];
+
+              for (const subResp of batchResponse.responses ?? []) {
+                const idx = parseInt(subResp.id, 10) - 1;
+                const messageId = messageIds[idx];
+                if (subResp.status >= 200 && subResp.status < 300) {
+                  results.push({ messageId, data: subResp.body });
+                } else {
+                  failures.push({ messageId, status: subResp.status, error: subResp.body });
+                }
+              }
+
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      results,
+                      failures,
+                      summary: {
+                        total: messageIds.length,
+                        succeeded: results.length,
+                        failed: failures.length,
+                      },
+                    }),
+                  },
+                ],
+              };
+            } catch (err) {
+              logger.error(`get-messages-batch failed: ${(err as Error).message}`);
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({ error: (err as Error).message }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+          })
       );
       registeredNames.push('get-messages-batch');
       registeredCount++;
@@ -1307,14 +1338,12 @@ export function registerGraphTools(
           attachmentId: z
             .string()
             .min(1)
-            .describe(
-              'The ID of the attachment to download. Get it from list-mail-attachments.'
-            ),
+            .describe('The ID of the attachment to download. Get it from list-mail-attachments.'),
           userId: z
             .string()
             .optional()
             .describe(
-              "For shared/other mailboxes: the user id or UPN whose message this is. " +
+              'For shared/other mailboxes: the user id or UPN whose message this is. ' +
                 "Omit (or pass 'me') for the signed-in user's own mailbox. The staged " +
                 "copy is always written to the signed-in user's OneDrive."
             ),
@@ -1327,51 +1356,15 @@ export function registerGraphTools(
         },
         async (params) =>
           withUsageLog('download-mail-attachment', async () => {
-          const messageId = (params.messageId ?? '').trim();
-          const attachmentId = (params.attachmentId ?? '').trim();
-          if (!messageId || !attachmentId) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'messageId and attachmentId are both required and must be non-empty.',
-                  }),
-                },
-              ],
-              isError: true,
-            };
-          }
-
-          const userId = (params.userId ?? '').trim();
-          const mailBase =
-            userId && userId.toLowerCase() !== 'me'
-              ? `/users/${encodeURIComponent(userId)}`
-              : '/me';
-          const attachmentPath = `${mailBase}/messages/${encodeURIComponent(
-            messageId
-          )}/attachments/${encodeURIComponent(attachmentId)}`;
-
-          try {
-            // 1. Metadata first (no contentBytes — $select keeps it small and
-            //    lets us reject non-file attachments before pulling any bytes).
-            const metadata = (await graphClient.makeRequest(
-              `${attachmentPath}?$select=id,name,contentType,size,isInline`
-            )) as {
-              '@odata.type'?: string;
-              name?: string;
-              contentType?: string;
-              size?: number;
-            };
-
-            const odataType = metadata['@odata.type'];
-            if (odataType && odataType !== '#microsoft.graph.fileAttachment') {
+            const messageId = (params.messageId ?? '').trim();
+            const attachmentId = (params.attachmentId ?? '').trim();
+            if (!messageId || !attachmentId) {
               return {
                 content: [
                   {
                     type: 'text',
                     text: JSON.stringify({
-                      error: `download-mail-attachment only supports fileAttachment, but this is ${odataType}. Use get-mail-attachment for itemAttachment, or follow the @odata reference for referenceAttachment.`,
+                      error: 'messageId and attachmentId are both required and must be non-empty.',
                     }),
                   },
                 ],
@@ -1379,105 +1372,144 @@ export function registerGraphTools(
               };
             }
 
-            if (typeof metadata.size === 'number' && metadata.size > MAX_ATTACHMENT_BYTES) {
+            const userId = (params.userId ?? '').trim();
+            const mailBase =
+              userId && userId.toLowerCase() !== 'me'
+                ? `/users/${encodeURIComponent(userId)}`
+                : '/me';
+            const attachmentPath = `${mailBase}/messages/${encodeURIComponent(
+              messageId
+            )}/attachments/${encodeURIComponent(attachmentId)}`;
+
+            try {
+              // 1. Metadata first (no contentBytes — $select keeps it small and
+              //    lets us reject non-file attachments before pulling any bytes).
+              const metadata = (await graphClient.makeRequest(
+                `${attachmentPath}?$select=id,name,contentType,size,isInline`
+              )) as {
+                '@odata.type'?: string;
+                name?: string;
+                contentType?: string;
+                size?: number;
+              };
+
+              const odataType = metadata['@odata.type'];
+              if (odataType && odataType !== '#microsoft.graph.fileAttachment') {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify({
+                        error: `download-mail-attachment only supports fileAttachment, but this is ${odataType}. Use get-mail-attachment for itemAttachment, or follow the @odata reference for referenceAttachment.`,
+                      }),
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+
+              if (typeof metadata.size === 'number' && metadata.size > MAX_ATTACHMENT_BYTES) {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify({
+                        error: `Attachment is ${metadata.size} bytes, which exceeds the ${MAX_ATTACHMENT_BYTES}-byte (250 MB) staging limit.`,
+                      }),
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+
+              // 2. Stream the raw bytes from /$value (server-side only — never
+              //    serialized into the tool response).
+              const { buffer, contentType: rawContentType } = await graphClient.fetchBinary(
+                `${attachmentPath}/$value`
+              );
+              if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify({
+                        error: `Attachment is ${buffer.byteLength} bytes, which exceeds the ${MAX_ATTACHMENT_BYTES}-byte (250 MB) staging limit.`,
+                      }),
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+              const contentType =
+                metadata.contentType || rawContentType || 'application/octet-stream';
+
+              // 3. Build a collision-safe staging filename and upload to a marked
+              //    folder under the user's OneDrive root. Using /drive/root (not
+              //    special/approot) because the granted scope is Files.ReadWrite,
+              //    not Files.ReadWrite.AppFolder — approot is the AppFolder construct
+              //    and can 404 under the broad scope. The path auto-creates the folder.
+              const rawName =
+                (metadata.name && String(metadata.name)) || `attachment-${attachmentId}`;
+              const safeName =
+                rawName
+                  .replace(/[\\/:*?"<>|]/g, '_')
+                  .replace(/\s+/g, ' ')
+                  .trim() || 'attachment';
+              const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              const stagedName = `${uniquePrefix}-${safeName}`;
+              const uploadPath = `/me/drive/root:/Apps/TSQ-M365-MCP-staging/${encodeURIComponent(
+                stagedName
+              )}:/content`;
+
+              const driveItem = (await graphClient.putBinary(uploadPath, buffer, contentType)) as {
+                id?: string;
+                '@microsoft.graph.downloadUrl'?: string;
+              };
+
+              const stagedDriveItemId = driveItem.id;
+              let downloadUrl = driveItem['@microsoft.graph.downloadUrl'];
+
+              // The PUT response often omits the downloadUrl; fetch it explicitly
+              // from the item if so.
+              if (!downloadUrl && stagedDriveItemId) {
+                const fetched = (await graphClient.makeRequest(
+                  `/me/drive/items/${encodeURIComponent(stagedDriveItemId)}`
+                )) as { '@microsoft.graph.downloadUrl'?: string };
+                downloadUrl = fetched['@microsoft.graph.downloadUrl'];
+              }
+
+              const sha256 = createHash('sha256').update(buffer).digest('hex');
+
               return {
                 content: [
                   {
                     type: 'text',
                     text: JSON.stringify({
-                      error: `Attachment is ${metadata.size} bytes, which exceeds the ${MAX_ATTACHMENT_BYTES}-byte (250 MB) staging limit.`,
+                      downloadUrl,
+                      name: rawName,
+                      size: buffer.byteLength,
+                      contentType,
+                      sha256,
+                      expiresInSeconds: 3600,
+                      stagedDriveItemId,
+                      note: 'The downloadUrl is pre-authed and short-lived (~1 hour). Fetch it directly via curl/HTTP to download the bytes to your own disk — no Authorization header needed. The bytes are NOT returned through this tool. Verify the download against sha256.',
                     }),
                   },
                 ],
-                isError: true,
               };
-            }
-
-            // 2. Stream the raw bytes from /$value (server-side only — never
-            //    serialized into the tool response).
-            const { buffer, contentType: rawContentType } = await graphClient.fetchBinary(
-              `${attachmentPath}/$value`
-            );
-            if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
+            } catch (err) {
+              logger.error(`download-mail-attachment failed: ${(err as Error).message}`);
               return {
                 content: [
                   {
                     type: 'text',
-                    text: JSON.stringify({
-                      error: `Attachment is ${buffer.byteLength} bytes, which exceeds the ${MAX_ATTACHMENT_BYTES}-byte (250 MB) staging limit.`,
-                    }),
+                    text: JSON.stringify({ error: (err as Error).message }),
                   },
                 ],
                 isError: true,
               };
             }
-            const contentType =
-              metadata.contentType || rawContentType || 'application/octet-stream';
-
-            // 3. Build a collision-safe staging filename and upload to a marked
-            //    folder under the user's OneDrive root. Using /drive/root (not
-            //    special/approot) because the granted scope is Files.ReadWrite,
-            //    not Files.ReadWrite.AppFolder — approot is the AppFolder construct
-            //    and can 404 under the broad scope. The path auto-creates the folder.
-            const rawName = (metadata.name && String(metadata.name)) || `attachment-${attachmentId}`;
-            const safeName =
-              rawName.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'attachment';
-            const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            const stagedName = `${uniquePrefix}-${safeName}`;
-            const uploadPath = `/me/drive/root:/Apps/TSQ-M365-MCP-staging/${encodeURIComponent(
-              stagedName
-            )}:/content`;
-
-            const driveItem = (await graphClient.putBinary(
-              uploadPath,
-              buffer,
-              contentType
-            )) as { id?: string; '@microsoft.graph.downloadUrl'?: string };
-
-            const stagedDriveItemId = driveItem.id;
-            let downloadUrl = driveItem['@microsoft.graph.downloadUrl'];
-
-            // The PUT response often omits the downloadUrl; fetch it explicitly
-            // from the item if so.
-            if (!downloadUrl && stagedDriveItemId) {
-              const fetched = (await graphClient.makeRequest(
-                `/me/drive/items/${encodeURIComponent(stagedDriveItemId)}`
-              )) as { '@microsoft.graph.downloadUrl'?: string };
-              downloadUrl = fetched['@microsoft.graph.downloadUrl'];
-            }
-
-            const sha256 = createHash('sha256').update(buffer).digest('hex');
-
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    downloadUrl,
-                    name: rawName,
-                    size: buffer.byteLength,
-                    contentType,
-                    sha256,
-                    expiresInSeconds: 3600,
-                    stagedDriveItemId,
-                    note: 'The downloadUrl is pre-authed and short-lived (~1 hour). Fetch it directly via curl/HTTP to download the bytes to your own disk — no Authorization header needed. The bytes are NOT returned through this tool. Verify the download against sha256.',
-                  }),
-                },
-              ],
-            };
-          } catch (err) {
-            logger.error(`download-mail-attachment failed: ${(err as Error).message}`);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({ error: (err as Error).message }),
-                },
-              ],
-              isError: true,
-            };
-          }
-        })
+          })
       );
       registeredNames.push('download-mail-attachment');
       registeredCount++;

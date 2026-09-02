@@ -267,18 +267,23 @@ describe('graph-tools', () => {
 
       const schema = tool!.schema;
 
+      // These assert that the override is applied and still carries the semantics
+      // that matter, not the exact prose. The wording was deliberately compressed on
+      // 2026-09-02: repeated verbatim across 136 tools it cost ~24,000 tokens of the
+      // catalogue, and the long form now lives once in the server instructions.
+
       // $filter override
       expect(schema['filter']).toBeDefined();
-      expect(schema['filter'].description).toContain('OData filter expression');
-      expect(schema['filter'].description).toContain('$count=true');
+      expect(schema['filter'].description).toContain('OData filter');
+      expect(schema['filter'].description).toContain('count=true');
 
       // $search override
       expect(schema['search']).toBeDefined();
-      expect(schema['search'].description).toContain('KQL search query');
+      expect(schema['search'].description).toContain('KQL');
 
       // $select override
       expect(schema['select']).toBeDefined();
-      expect(schema['select'].description).toContain('Comma-separated fields');
+      expect(schema['select'].description).toContain('Fields to return');
 
       // $orderby override
       expect(schema['orderby']).toBeDefined();
@@ -286,10 +291,9 @@ describe('graph-tools', () => {
 
       // $count override
       expect(schema['count']).toBeDefined();
-      expect(schema['count'].description).toContain('advanced query mode');
+      expect(schema['count'].description).toContain('Advanced query mode');
 
       expect(schema['top'].description).toContain('Start small');
-      expect(schema['top'].description).toContain('$select');
     });
   });
 

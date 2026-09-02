@@ -13,6 +13,14 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
     'When you need an organizational user or recipient address, resolve it with list-users (or another directory tool); do not invent SMTP addresses.',
     'Directory $search on collections such as /users or /groups requires ConsistencyLevel: eventual when the tool exposes that header.',
     'Teams chat and channel messages: prefer HTML contentType in the body; plain text is often mangled by Graph.',
+    // Stated once here rather than repeated on all 136 tools. Measured 2026-09-02:
+    // the shared query parameters carried ~24,000 tokens of duplicated prose across
+    // the catalogue, which is also noise for tool search, since discovery matches on
+    // parameter names and descriptions as well as the description itself.
+    'Shared query parameters, the same on every list tool: top is page size (start at 5-15); select limits returned fields and is worth passing on every list; skip and orderby page and sort; fetchAllPages merges up to 100 pages and should be reserved for a genuine full export, since it can return an enormous payload.',
+    'Response-shape parameters, available on every tool: includeHeaders also returns response headers such as the ETag needed for a conditional update; excludeResponse returns only success or failure, which is worth passing when a write returns a large entity nobody needs.',
+    'Advanced query mode: count=true sends ConsistencyLevel: eventual, and is required for contains() filters and for filtering on flag or flagStatus.',
+    'Write tools describe their request body as a worked example on the body parameter itself, rather than as a full schema. Send the fields named there; Graph validates the rest, and its error text names the offending field.',
   ];
   if (opts.readOnly) parts.push('This server is read-only; write operations are disabled.');
   if (opts.multiAccount)
