@@ -53,11 +53,19 @@ export interface Report {
   topTools: ToolLine[];
   errorTools: ToolLine[];
   /** The file-handling split, called out because a retirement decision rides on it. */
-  fileSplit: { replacement: number; superseded: number; supersededDetail: ToolLine[] };
+  fileSplit: {
+    replacement: number;
+    superseded: number;
+    supersededDetail: ToolLine[];
+    /** False once the superseded tools are no longer advertised, which changes the advice. */
+    supersededStillAdvertised: boolean;
+  };
   /** Allowlisted capabilities with no calls in either window. */
   neverUsed: string[];
   /** Plain sentences, most significant first. Empty when the week was unremarkable. */
   anomalies: string[];
+  /** A few words naming the single most notable thing, for the subject line. */
+  headline: string;
 }
 
 /** The capability `get-file` replaced, and the five it replaced. */
@@ -94,6 +102,13 @@ function countBy<T>(rows: UsageRow[], key: (r: UsageRow) => T): Map<T, UsageRow[
     else out.set(k, [row]);
   }
   return out;
+}
+
+/** "laura.mirarchi@x.com" -> "Laura", for a subject line that reads like a sentence. */
+function friendlyName(upn: string): string {
+  const local = upn.split('@')[0] ?? upn;
+  const first = local.split(/[._-]/)[0] ?? local;
+  return first ? first.charAt(0).toUpperCase() + first.slice(1) : upn;
 }
 
 /** A readable multiple: 3.4x, or 'from nothing' when the base was zero. */
@@ -152,15 +167,78 @@ function findAnomalies(
     );
   }
 
+  // Only advise on the file split while the superseded tools are actually advertised.
+  // They were retired in tsq.18, and a report that keeps recommending against a
+  // retirement already carried out is worse than one that says nothing: it reads as
+  // current advice, and the first edition Scott sees should not argue with a decision
+  // taken the night before.
   const fileTotal = fileSplit.replacement + fileSplit.superseded;
   if (fileTotal >= 10 && fileSplit.superseded > fileSplit.replacement) {
     const pct = Math.round((fileSplit.replacement / fileTotal) * 100);
-    out.push(
-      `File handling: get-file is the minority path at ${pct}% (${fileSplit.replacement} calls against ${fileSplit.superseded} on the five it replaced). Retiring them would remove the route most callers use.`
-    );
+    if (fileSplit.supersededStillAdvertised) {
+      out.push(
+        `File handling: get-file is the minority path at ${pct}% (${fileSplit.replacement} calls against ${fileSplit.superseded} on the five it replaced). Retiring them would remove the route most callers use.`
+      );
+    } else if (fileSplit.superseded > 0) {
+      out.push(
+        `File handling: ${fileSplit.superseded} calls still went to capabilities retired part-way through this window, against ${fileSplit.replacement} on get-file. Expect that to reach zero next week; if it does not, the retirement did not take.`
+      );
+    }
   }
 
   return out;
+}
+
+/**
+ * The single most notable thing, in a few words, for the subject line.
+ *
+ * Ordered by what would make a reader open the mail first: something failing beats
+ * someone leaving, which beats someone arriving, which beats a change in volume. A
+ * quiet week says so rather than manufacturing drama.
+ */
+function buildHeadline(
+  users: UserLine[],
+  tools: ToolLine[],
+  current: Totals,
+  prior: Totals
+): string {
+  const failing = tools
+    .filter((t) => t.errors >= 5 && t.errors / t.calls >= 0.2)
+    .sort((a, b) => b.errors - a.errors)[0];
+  if (failing) {
+    return `${failing.tool} failing ${Math.round((failing.errors / failing.calls) * 100)}% of the time`;
+  }
+
+  const lapsed = users
+    .filter((u) => u.calls === 0 && u.priorCalls >= 10)
+    .sort((a, b) => b.priorCalls - a.priorCalls)[0];
+  if (lapsed && lapsed.priorCalls >= 100) {
+    return `${friendlyName(lapsed.upn)} stopped after ${lapsed.priorCalls} calls`;
+  }
+
+  const arrived = users
+    .filter((u) => u.priorCalls === 0 && u.calls >= 10)
+    .sort((a, b) => b.calls - a.calls)[0];
+  if (arrived) {
+    return `${friendlyName(arrived.upn)} is new, at ${arrived.calls} calls`;
+  }
+
+  const grown = users
+    .filter((u) => u.priorCalls >= 10 && u.calls / u.priorCalls >= 3)
+    .sort((a, b) => b.calls / b.priorCalls - a.calls / a.priorCalls)[0];
+  if (grown) {
+    return `${friendlyName(grown.upn)} up ${(grown.calls / grown.priorCalls).toFixed(1)}x`;
+  }
+
+  if (lapsed) return `${friendlyName(lapsed.upn)} stopped`;
+
+  if (prior.calls >= 50) {
+    const ratio = current.calls / prior.calls;
+    if (ratio <= 0.5) return `volume down ${(1 / ratio).toFixed(1)}x`;
+    if (ratio >= 2) return `volume up ${ratio.toFixed(1)}x`;
+  }
+
+  return 'nothing unusual';
 }
 
 export function buildReport(
@@ -204,14 +282,20 @@ export function buildReport(
   const topTools = [...allTools].sort((a, b) => b.calls - a.calls).slice(0, 10);
   const errorTools = allTools.filter((t) => t.errors > 0).sort((a, b) => b.errors - a.errors);
 
+  const advertised = options.allowlist ? new Set(options.allowlist) : undefined;
   const fileSplit = {
     replacement: toolLine(FILE_REPLACEMENT).calls,
     superseded: FILE_SUPERSEDED.reduce((n, t) => n + toolLine(t).calls, 0),
     supersededDetail: FILE_SUPERSEDED.map(toolLine),
+    // With no allowlist to check against, assume they are still advertised — the
+    // cautious reading, since it only ever adds a line rather than removing one.
+    supersededStillAdvertised: advertised ? FILE_SUPERSEDED.some((t) => advertised.has(t)) : true,
   };
 
   const seen = new Set(rows.map((r) => r.tool));
   const neverUsed = (options.allowlist ?? []).filter((t) => !seen.has(t)).sort();
+
+  const anomalies = findAnomalies(current, prior, users, allTools, fileSplit);
 
   return {
     window: { from, to },
@@ -223,6 +307,7 @@ export function buildReport(
     errorTools,
     fileSplit,
     neverUsed,
-    anomalies: findAnomalies(current, prior, users, allTools, fileSplit),
+    anomalies,
+    headline: buildHeadline(users, allTools, totals(current), totals(prior)),
   };
 }

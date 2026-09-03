@@ -10,9 +10,23 @@
 
 import type { Report, ToolLine, UserLine } from './analyze.js';
 
-const FONT = 'font-family:Segoe UI,Arial,sans-serif;font-size:14px;line-height:1.5;color:#202020';
-const TABLE = 'border-collapse:collapse;font-size:13px;margin:8px 0';
-const CELL = 'border:1px solid #d0d0d0;padding:6px 10px;text-align:left';
+/**
+ * Segoe UI 11pt throughout, tables included.
+ *
+ * The family and size are repeated on the table and on every cell rather than left to
+ * inherit: Outlook and most webmail reset fonts inside table elements, so a single
+ * declaration on the wrapper produces a document that looks right in a browser and
+ * wrong in the client the report is actually read in.
+ */
+// The family is single-quoted, so every style attribute below must be double-quoted.
+// A single-quoted style attribute holding a single-quoted font family terminates at
+// the first inner quote and drops the rest of the declaration — silently, and only in
+// the mail client rather than in any preview. Hence double quotes on every attribute.
+const FONT_STACK = "font-family:'Segoe UI',Segoe,Tahoma,Arial,sans-serif;font-size:11pt";
+const FONT = `${FONT_STACK};line-height:1.5;color:#202020`;
+const TABLE = `border-collapse:collapse;margin:8px 0;${FONT_STACK}`;
+const CELL = `border:1px solid #d0d0d0;padding:6px 10px;text-align:left;${FONT_STACK}`;
+const HEADING = `${FONT_STACK};font-weight:600;margin:16px 0 4px`;
 
 function escapeHtml(value: string): string {
   return value
@@ -41,11 +55,11 @@ function rate(errors: number, calls: number): string {
 }
 
 function table(headers: string[], rows: string[][]): string {
-  const head = headers.map((h) => `<th style='${CELL};background:#f4f4f4'>${h}</th>`).join('');
+  const head = headers.map((h) => `<th style="${CELL};background:#f4f4f4'>${h}</th>`).join('');
   const body = rows
-    .map((r) => `<tr>${r.map((c) => `<td style='${CELL}'>${c}</td>`).join('')}</tr>`)
+    .map((r) => `<tr>${r.map((c) => `<td style="${CELL}">${c}</td>`).join('')}</tr>`)
     .join('');
-  return `<table style='${TABLE}'><tr>${head}</tr>${body}</table>`;
+  return `<table style="${TABLE}"><tr>${head}</tr>${body}</table>`;
 }
 
 function userRows(users: UserLine[]): string[][] {
@@ -66,24 +80,26 @@ function toolRows(tools: ToolLine[]): string[][] {
   ]);
 }
 
+/** "31 August" -> "August 31", the way the subject line reads. */
+function monthDay(date: Date): string {
+  return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+}
+
 export function renderSubject(report: Report): string {
-  const headline = report.anomalies.length
-    ? `${report.anomalies.length} thing${report.anomalies.length === 1 ? '' : 's'} to look at`
-    : 'nothing unusual';
-  return `M365 connector — week to ${day(report.window.to)}, ${headline}`;
+  return `M365 Connector: ${monthDay(report.window.from)} to ${monthDay(report.window.to)}, ${report.headline}`;
 }
 
 export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}): string {
   const { current, prior } = report;
   const parts: string[] = [];
 
-  parts.push(`<div style='${FONT}'>`);
+  parts.push(`<div style="${FONT}">`);
   parts.push(
-    `<p style='color:#666'>Week of ${day(report.window.from)} to ${day(report.window.to)}, compared with ${day(report.priorWindow.from)} to ${day(report.priorWindow.to)}.</p>`
+    `<p style="color:#666;${FONT_STACK}">Week of ${day(report.window.from)} to ${day(report.window.to)}, compared with ${day(report.priorWindow.from)} to ${day(report.priorWindow.to)}.</p>`
   );
 
   if (report.anomalies.length) {
-    parts.push(`<h3 style='font-size:15px;margin-bottom:4px'>Worth a look</h3><ul>`);
+    parts.push(`<h3 style="${HEADING}">Worth a look</h3><ul>`);
     for (const line of report.anomalies) parts.push(`<li>${escapeHtml(line)}</li>`);
     parts.push('</ul>');
   } else {
@@ -92,7 +108,7 @@ export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}
     );
   }
 
-  parts.push(`<h3 style='font-size:15px;margin-bottom:4px'>The week in totals</h3>`);
+  parts.push(`<h3 style="${HEADING}">The week in totals</h3>`);
   parts.push(
     table(
       ['', 'This week', 'Last week'],
@@ -106,19 +122,19 @@ export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}
     )
   );
 
-  parts.push(`<h3 style='font-size:15px;margin-bottom:4px'>Who used it</h3>`);
+  parts.push(`<h3 style="${HEADING}">Who used it</h3>`);
   parts.push(table(['Person', 'Calls', 'Capabilities', 'Change'], userRows(report.users)));
 
-  parts.push(`<h3 style='font-size:15px;margin-bottom:4px'>Most used</h3>`);
+  parts.push(`<h3 style="${HEADING}">Most used</h3>`);
   parts.push(table(['Capability', 'Calls', 'Change', 'Errors'], toolRows(report.topTools)));
 
   if (report.errorTools.length) {
-    parts.push(`<h3 style='font-size:15px;margin-bottom:4px'>Where the errors were</h3>`);
+    parts.push(`<h3 style="${HEADING}">Where the errors were</h3>`);
     parts.push(table(['Capability', 'Calls', 'Change', 'Errors'], toolRows(report.errorTools)));
   }
 
   const fileTotal = report.fileSplit.replacement + report.fileSplit.superseded;
-  parts.push(`<h3 style='font-size:15px;margin-bottom:4px'>File handling</h3>`);
+  parts.push(`<h3 style="${HEADING}">File handling</h3>`);
   parts.push(
     `<p>get-file: <strong>${report.fileSplit.replacement}</strong> calls. The five capabilities it replaced: <strong>${report.fileSplit.superseded}</strong>. ` +
       (fileTotal
@@ -128,18 +144,16 @@ export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}
   );
 
   if (report.neverUsed.length) {
+    parts.push(`<h3 style="${HEADING}">Never used (${report.neverUsed.length})</h3>`);
     parts.push(
-      `<h3 style='font-size:15px;margin-bottom:4px'>Never used (${report.neverUsed.length})</h3>`
-    );
-    parts.push(
-      `<p style='color:#666;font-size:13px'>Advertised to everyone, called by nobody in this period: ${report.neverUsed.map(escapeHtml).join(', ')}</p>`
+      `<p style="color:#666;${FONT_STACK}">Advertised to everyone, called by nobody in this period: ${report.neverUsed.map(escapeHtml).join(', ')}</p>`
     );
   }
 
   if (options.secretExpiry) {
     const days = Math.round((options.secretExpiry.getTime() - Date.now()) / 86400000);
     parts.push(
-      `<p style='color:#666;font-size:12px'>Connector credential expires ${options.secretExpiry.toISOString().slice(0, 10)} — ${days} days from now.</p>`
+      `<p style="color:#666;${FONT_STACK}">Connector credential expires ${options.secretExpiry.toISOString().slice(0, 10)} — ${days} days from now.</p>`
     );
   }
 

@@ -69,6 +69,23 @@ describe('anomalies', () => {
     );
   });
 
+  it('stops advising against a retirement once the tools are no longer advertised', () => {
+    const rows = [
+      ...Array.from({ length: 11 }, () => row(1, { tool: 'get-file' })),
+      ...Array.from({ length: 18 }, () => row(1, { tool: 'download-mail-attachment' })),
+    ];
+    // Allowlist without the superseded tools: they shipped as retired in tsq.18.
+    const after = buildReport(rows, {
+      now: NOW,
+      windowDays: 7,
+      allowlist: ['get-file', 'put-file', 'attach-file'],
+    });
+    const text = after.anomalies.join(' ');
+    expect(text).not.toContain('Retiring them would remove');
+    expect(text).toContain('retired part-way through this window');
+    expect(after.fileSplit.supersededStillAdvertised).toBe(false);
+  });
+
   it('flags the file-handling reversal that a totals-only report would hide', () => {
     const rows = [
       ...Array.from({ length: 11 }, () => row(1, { tool: 'get-file' })),
@@ -112,8 +129,24 @@ describe('rendering', () => {
     row(2, { upn: 'here@x.com', tool: 'send-mail', outcome: 'error' }),
   ]);
 
-  it('puts the count of things worth looking at in the subject', () => {
-    expect(renderSubject(report)).toMatch(/things? to look at/);
+  it('names the window and the single most notable thing in the subject', () => {
+    const busy = build([
+      ...Array.from({ length: 400 }, () => row(9, { upn: 'laura.mirarchi@x.com' })),
+      ...Array.from({ length: 3 }, () => row(1, { upn: 'here@x.com' })),
+    ]);
+    expect(renderSubject(busy)).toBe(
+      'M365 Connector: September 1 to September 8, Laura stopped after 400 calls'
+    );
+  });
+
+  it('prefers a failing capability over a departed user in the headline', () => {
+    const rows = [
+      ...Array.from({ length: 400 }, () => row(9, { upn: 'laura.mirarchi@x.com' })),
+      ...Array.from({ length: 10 }, (_, i) =>
+        row(1, { tool: 'move-mail-message', outcome: i < 6 ? 'error' : 'success' })
+      ),
+    ];
+    expect(renderSubject(build(rows))).toContain('move-mail-message failing 60% of the time');
   });
 
   it('says nothing unusual when there is nothing unusual', () => {
@@ -123,6 +156,22 @@ describe('rendering', () => {
     ]);
     expect(renderSubject(quiet)).toContain('nothing unusual');
     expect(renderHtml(quiet)).toContain('Nothing unusual this week');
+  });
+
+  it('sets Segoe UI 11pt on the body, the table and every cell', () => {
+    const html = renderHtml(report);
+    // Mail clients reset fonts inside tables, so inheritance is not enough.
+    expect(html).toContain("font-family:'Segoe UI'");
+    const cells = html.match(/<td style="[^"]*"/g) ?? [];
+    expect(cells.length).toBeGreaterThan(0);
+    for (const cell of cells) {
+      expect(cell).toContain('font-size:11pt');
+      expect(cell).toContain("'Segoe UI'");
+      // A single-quoted attribute would be terminated by the quoted family name.
+      expect(cell.startsWith('<td style="')).toBe(true);
+    }
+    expect(html).not.toContain('font-size:13px');
+    expect(html).not.toContain('font-size:14px');
   });
 
   it('renders tables and the file-handling line', () => {
