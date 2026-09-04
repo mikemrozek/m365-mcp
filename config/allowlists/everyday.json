@@ -1,9 +1,8 @@
 {
   "name": "M365 Everyday",
-  "description": "Usage-derived everyday toolset: the Core draft, plus every tool observed in real use, plus capabilities shipped in tsq.13/tsq.14. Nothing observed in use is excluded.",
+  "description": "Usage-derived everyday toolset: the Core draft, plus every tool observed in real use, plus capabilities shipped in tsq.13/tsq.14. One deliberate exception (tsq.19): add-mail-attachment and create-mail-attachment-upload-session were removed DESPITE heavy observed use — that use was Claude substituting them for attach-file/put-file, silently failing on the sandbox-blocked upload host (149 calls, one user, 2.7 session mints per draft on 2026-08-04). The curated pair covers the same job on a working route, verified end-to-end 2026-09-03.",
   "tools": [
     "accept-calendar-event",
-    "add-mail-attachment",
     "attach-file",
     "cancel-calendar-event",
     "check-notifications",
@@ -13,7 +12,6 @@
     "create-chat",
     "create-draft-email",
     "create-forward-draft",
-    "create-mail-attachment-upload-session",
     "create-mail-child-folder",
     "create-mail-folder",
     "create-mail-rule",

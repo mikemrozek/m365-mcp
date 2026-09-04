@@ -438,10 +438,13 @@ export function registerFileTools(
                 }
               : {}),
             note:
-              'Download link, valid roughly one hour, no auth header needed. Fetch it and do ' +
-              "whatever you need with the file. If you want the document's prose instead, call " +
-              "again with as:'text'. Note some sandboxes cannot reach the tenant SharePoint " +
-              'host — if the fetch is refused, that is an environment restriction, not a bad link.',
+              'Download link, valid roughly one hour, no auth header needed. QUOTE THE URL in ' +
+              'any shell command — it contains & characters, and an unquoted & truncates the ' +
+              'URL so the auth token never arrives (symptom: 401 generalException; fix the ' +
+              'quoting, do not blame the link). Fetch it and do whatever you need with the ' +
+              "file. If you want the document's prose instead, call again with as:'text'. A " +
+              '403 with an x-deny-reason header means your environment blocks the tenant ' +
+              'SharePoint host — an egress restriction, not a bad link.',
           });
         })
     );
@@ -593,13 +596,18 @@ export function registerFileTools(
             folder,
             howTo:
               'PUT the bytes to uploadUrl with NO Authorization header — the URL carries its ' +
-              `own. Send Content-Range: bytes 0-${Math.max(size - 1, 0)}/${size} for a single ` +
+              'own. QUOTE THE URL in any shell command: it contains & and single quotes, and ' +
+              'an unquoted & truncates the URL so the auth token never arrives. ' +
+              `Send Content-Range: bytes 0-${Math.max(size - 1, 0)}/${size} for a single ` +
               'shot; above ~60MB send sequential chunks that are multiples of 320KB. The final ' +
               'response body is the created item — take its id and pass that to attach-file.',
             note:
               'The URL is short-lived and single-session, and the bytes go straight to Microsoft ' +
-              'rather than through this conversation. Some sandboxes cannot reach the upload ' +
-              'host; if the PUT is refused, that is an environment restriction, not a bad URL.',
+              'rather than through this conversation. Reading the error: 403 with an ' +
+              'x-deny-reason header means your environment blocks the upload host — an egress ' +
+              'restriction, not a bad URL. 401 generalException means the auth token never ' +
+              'reached Microsoft — almost always an unquoted URL split at the first &; fix the ' +
+              'quoting and mint a fresh session before blaming the environment.',
           });
         })
     );
