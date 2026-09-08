@@ -1,18 +1,26 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   __resetForTests,
+  cancelWatch,
   drain,
   dueForRenewal,
   enqueueNotification,
+  getWatch,
   listSubscriptions,
+  listWatches,
   markLapsed,
   markRenewed,
   newClientState,
+  recordWatchMatch,
   registerSubscription,
+  registerWatch,
+  requeue,
   stats,
   unregisterSubscription,
   waitForNotifications,
+  watchesForSubscription,
   type SubscriptionRecord,
+  type WatchRecord,
 } from '../src/notifications.js';
 
 const OWNER = 'oid-alice';
@@ -260,5 +268,106 @@ describe('renewal bookkeeping', () => {
 
     expect(drain(OWNER).lapsedSubscriptions).toHaveLength(0);
     expect(listSubscriptions(OWNER)[0].expiresAt).toBe(newExpiry);
+  });
+});
+
+describe('correspondence watches (tsq.20)', () => {
+  beforeEach(() => __resetForTests());
+
+  function makeWatch(overrides: Partial<WatchRecord> = {}): WatchRecord {
+    return {
+      watchId: 'w-1',
+      ownerOid: OWNER,
+      subscriptionId: 'sub-1',
+      kind: 'mail',
+      conversationId: 'conv-1',
+      note: 'Tiffany, sign-off',
+      createdAt: Date.now(),
+      matchedCount: 0,
+      ...overrides,
+    };
+  }
+
+  it('lists and cancels only the caller’s own watches', () => {
+    registerSubscription(makeRecord());
+    registerWatch(makeWatch());
+    registerWatch(makeWatch({ watchId: 'w-2', ownerOid: OTHER }));
+
+    expect(listWatches(OWNER).map((w) => w.watchId)).toEqual(['w-1']);
+    expect(cancelWatch('w-1', OTHER)).toBe(false);
+    expect(cancelWatch('w-1', OWNER)).toBe(true);
+    expect(listWatches(OWNER)).toHaveLength(0);
+    // The other user’s watch is untouched.
+    expect(listWatches(OTHER)).toHaveLength(1);
+  });
+
+  it('scopes getWatch and watchesForSubscription to the owner', () => {
+    registerWatch(makeWatch());
+    expect(getWatch('w-1', OWNER)?.watchId).toBe('w-1');
+    expect(getWatch('w-1', OTHER)).toBeUndefined();
+    expect(watchesForSubscription('sub-1', OWNER)).toHaveLength(1);
+    expect(watchesForSubscription('sub-1', OTHER)).toHaveLength(0);
+  });
+
+  it('cancelling the subscription cascades to its watches', () => {
+    registerSubscription(makeRecord());
+    registerWatch(makeWatch());
+    registerWatch(makeWatch({ watchId: 'w-other-sub', subscriptionId: 'sub-2' }));
+
+    unregisterSubscription('sub-1', OWNER);
+    expect(listWatches(OWNER).map((w) => w.watchId)).toEqual(['w-other-sub']);
+  });
+
+  it('enforces the per-user watch cap with an error, not a throw', () => {
+    for (let i = 0; i < 20; i++) {
+      expect(registerWatch(makeWatch({ watchId: `w-${i}` })).error).toBeUndefined();
+    }
+    const result = registerWatch(makeWatch({ watchId: 'w-overflow' }));
+    expect(result.error).toMatch(/maximum/);
+    expect(listWatches(OWNER)).toHaveLength(20);
+    // Another user is not affected by this user’s cap.
+    expect(registerWatch(makeWatch({ watchId: 'w-b', ownerOid: OTHER })).error).toBeUndefined();
+  });
+
+  it('records matches', () => {
+    registerWatch(makeWatch());
+    recordWatchMatch('w-1');
+    recordWatchMatch('w-1');
+    expect(listWatches(OWNER)[0].matchedCount).toBe(2);
+  });
+
+  it('requeue restores entries at the front, preserving order', () => {
+    registerSubscription(makeRecord());
+    enqueueNotification('sub-1', 'secret-state', {
+      resource: 'r',
+      changeType: 'created',
+      resourceId: 'first',
+    });
+    const drained = drain(OWNER).notifications;
+    expect(drained.map((e) => e.resourceId)).toEqual(['first']);
+
+    enqueueNotification('sub-1', 'secret-state', {
+      resource: 'r',
+      changeType: 'created',
+      resourceId: 'second',
+    });
+    requeue(OWNER, drained);
+    expect(drain(OWNER).notifications.map((e) => e.resourceId)).toEqual(['first', 'second']);
+  });
+
+  it('requeue does not wake a pending waiter', async () => {
+    registerSubscription(makeRecord());
+    enqueueNotification('sub-1', 'secret-state', { resource: 'r', changeType: 'created' });
+    const drained = drain(OWNER).notifications;
+
+    const wait = waitForNotifications(OWNER, 150);
+    requeue(OWNER, drained);
+    const winner = await Promise.race([
+      wait.then(() => 'woken'),
+      new Promise((r) => setTimeout(() => r('quiet'), 60)),
+    ]);
+    expect(winner).toBe('quiet');
+    // The requeued entry is still there for the next drain.
+    expect((await wait).length + drain(OWNER).notifications.length).toBeGreaterThan(0);
   });
 });

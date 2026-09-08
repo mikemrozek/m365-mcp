@@ -5,16 +5,26 @@ import logger from './logger.js';
 import { getRequestActor, getRequestTokens } from './request-context.js';
 import { withUsageLog } from './usage-log.js';
 import {
+  cancelWatch,
   drain,
   dueForRenewal,
+  getWatch,
   listSubscriptions,
+  listWatches,
   markLapsed,
   markRenewed,
   newClientState,
+  newWatchId,
+  recordWatchMatch,
   registerSubscription,
+  registerWatch,
+  requeue,
   unregisterSubscription,
   waitForNotifications,
+  watchesForSubscription,
+  type NotificationEntry,
   type SubscriptionRecord,
+  type WatchRecord,
 } from './notifications.js';
 
 /**
@@ -147,6 +157,265 @@ const NO_IDENTITY =
   'Cannot determine the calling user. Change-notification tools require HTTP/OAuth mode ' +
   'where the caller is identified by their access token.';
 
+/**
+ * Creates a Graph subscription and registers it locally. Shared by
+ * subscribe-to-changes and watch-for-reply so the two cannot drift.
+ */
+async function createSubscription(
+  graphClient: GraphClient,
+  actor: { oid: string; upn?: string },
+  resolved: ResolvedResource,
+  friendly: string,
+  changeType: string
+): Promise<{ record: SubscriptionRecord } | { error: string }> {
+  const base = callbackBase();
+  if (!base) {
+    return {
+      error:
+        'No public callback URL available. Microsoft Graph must be able to reach this ' +
+        'server over HTTPS; set MS365_MCP_PUBLIC_URL to the public base URL.',
+    };
+  }
+  if (!base.startsWith('https://')) {
+    return { error: `Callback URL must be HTTPS; resolved '${base}'.` };
+  }
+
+  const clientState = newClientState();
+  const minutes = EXPIRY_MINUTES[resolved.family];
+  const expirationDateTime = new Date(Date.now() + minutes * 60_000).toISOString();
+
+  const created = (await graphClient.makeRequest('/subscriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      changeType,
+      notificationUrl: `${base}/graph-notifications`,
+      // Required by Graph for Teams resources whenever expiry is more
+      // than an hour out; harmless and useful elsewhere, since it is
+      // how we learn a subscription needs reauthorization or was removed.
+      lifecycleNotificationUrl: `${base}/graph-lifecycle`,
+      resource: resolved.resource,
+      expirationDateTime,
+      clientState,
+      includeResourceData: false,
+    }),
+  })) as { id?: string; expirationDateTime?: string };
+
+  if (!created?.id) {
+    return { error: 'Graph did not return a subscription id.' };
+  }
+
+  const record: SubscriptionRecord = {
+    subscriptionId: created.id,
+    ownerOid: actor.oid,
+    ownerUpn: actor.upn,
+    resource: resolved.resource,
+    friendly,
+    changeType,
+    clientState,
+    expiresAt: Date.parse(created.expirationDateTime ?? expirationDateTime),
+  };
+  registerSubscription(record);
+  return { record };
+}
+
+/**
+ * Reuses the caller's live subscription on `friendly` when one exists, else
+ * creates one. Watches ride on subscriptions; two watches on the inbox should
+ * share one subscription, not race to create duplicates.
+ */
+async function ensureSubscription(
+  graphClient: GraphClient,
+  actor: { oid: string; upn?: string },
+  friendly: string
+): Promise<{ record: SubscriptionRecord } | { error: string }> {
+  const existing = listSubscriptions(actor.oid).find(
+    (r) => r.friendly === friendly && !r.lapsed && r.expiresAt > Date.now()
+  );
+  if (existing) return { record: existing };
+  const resolved = resolveResource(friendly);
+  if ('error' in resolved) return resolved;
+  try {
+    return await createSubscription(graphClient, actor, resolved, friendly, 'created');
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+/**
+ * Entries already checked against a watch and found non-matching. Keyed by the
+ * entry object itself (entries are requeued by reference), so a watch-scoped
+ * wait loop doesn't re-fetch the same inbox noise every cycle. WeakMap so a
+ * drained-and-delivered entry costs nothing after it leaves the queue.
+ */
+const noMatchMemo = new WeakMap<NotificationEntry, Set<string>>();
+
+function memoNoMatch(entry: NotificationEntry, watchId: string): void {
+  const set = noMatchMemo.get(entry) ?? new Set<string>();
+  set.add(watchId);
+  noMatchMemo.set(entry, set);
+}
+
+/** What a matched watch hands back: enough to act on without another lookup. */
+interface Wake {
+  watchId: string;
+  kind: WatchRecord['kind'];
+  note?: string;
+  context?: string;
+  /** Id of the matched message; fetch it for the full content. */
+  messageId: string;
+  from?: string;
+  preview?: string;
+  receivedAt: string;
+}
+
+/** Strips tags and collapses whitespace for a short, safe preview. */
+function toPreview(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const flat = text
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return flat ? flat.slice(0, 140) : undefined;
+}
+
+/**
+ * Decides which drained entries answer a registered watch.
+ *
+ * Runs at drain time because matching requires fetching the changed item —
+ * mail notifications carry only an id, and the delegated token needed to
+ * fetch exists only during the owner's own call. A 404 on fetch means the
+ * item moved or vanished before we looked: not a match, not an error.
+ * Fetches are capped and cached per call.
+ */
+async function matchWatches(
+  graphClient: GraphClient,
+  ownerOid: string,
+  entries: NotificationEntry[]
+): Promise<Wake[]> {
+  const wakes: Wake[] = [];
+  const fetchCache = new Map<string, unknown>();
+  let fetches = 0;
+  const FETCH_CAP = 20;
+
+  for (const entry of entries) {
+    if (!entry.resourceId) continue;
+    const candidates = watchesForSubscription(entry.subscriptionId, ownerOid);
+    if (!candidates.length) continue;
+    if (fetches >= FETCH_CAP) break;
+
+    for (const w of candidates) {
+      if (noMatchMemo.get(entry)?.has(w.watchId)) continue;
+      try {
+        if (w.kind === 'mail') {
+          const key = `mail:${entry.resourceId}`;
+          if (!fetchCache.has(key)) {
+            fetches++;
+            fetchCache.set(
+              key,
+              await graphClient.makeRequest(
+                `/me/messages/${entry.resourceId}` +
+                  `?$select=conversationId,subject,from,receivedDateTime,bodyPreview`
+              )
+            );
+          }
+          const msg = fetchCache.get(key) as {
+            conversationId?: string;
+            subject?: string;
+            receivedDateTime?: string;
+            bodyPreview?: string;
+            from?: { emailAddress?: { address?: string; name?: string } };
+          };
+          if (msg?.conversationId !== w.conversationId) {
+            memoNoMatch(entry, w.watchId);
+            continue;
+          }
+          const sender = msg.from?.emailAddress?.address ?? '';
+          if (w.fromFilter && sender.toLowerCase() !== w.fromFilter.toLowerCase()) {
+            memoNoMatch(entry, w.watchId);
+            continue;
+          }
+          recordWatchMatch(w.watchId);
+          wakes.push({
+            watchId: w.watchId,
+            kind: 'mail',
+            note: w.note,
+            context: w.context ?? msg.subject,
+            messageId: entry.resourceId,
+            from: sender || undefined,
+            preview: toPreview(msg.bodyPreview),
+            receivedAt: msg.receivedDateTime ?? entry.receivedAt,
+          });
+        } else {
+          const key = `chat:${w.chatId}:${entry.resourceId}`;
+          if (!fetchCache.has(key)) {
+            fetches++;
+            fetchCache.set(
+              key,
+              await graphClient.makeRequest(`/chats/${w.chatId}/messages/${entry.resourceId}`)
+            );
+          }
+          const msg = fetchCache.get(key) as {
+            createdDateTime?: string;
+            body?: { content?: string };
+            from?: { user?: { id?: string; displayName?: string } };
+          };
+          const senderId = msg?.from?.user?.id ?? '';
+          const senderName = msg?.from?.user?.displayName ?? '';
+          // Your own messages in the chat fire notifications too; a reply-watch
+          // must not wake on the very message it is waiting for an answer to.
+          if (!senderId || senderId === ownerOid) {
+            memoNoMatch(entry, w.watchId);
+            continue;
+          }
+          if (
+            w.fromFilter &&
+            senderId !== w.fromFilter &&
+            senderName.toLowerCase() !== w.fromFilter.toLowerCase()
+          ) {
+            memoNoMatch(entry, w.watchId);
+            continue;
+          }
+          recordWatchMatch(w.watchId);
+          wakes.push({
+            watchId: w.watchId,
+            kind: 'chat',
+            note: w.note,
+            context: w.context,
+            messageId: entry.resourceId,
+            from: senderName || senderId,
+            preview: toPreview(msg?.body?.content),
+            receivedAt: msg?.createdDateTime ?? entry.receivedAt,
+          });
+        }
+      } catch (error) {
+        // Expected for moved/deleted items; anything else is still not worth
+        // failing the drain over — the entry stays visible as a plain
+        // notification either way. Memoized so a vanished item is not
+        // re-fetched on every wait cycle.
+        memoNoMatch(entry, w.watchId);
+        logger.info(`watch match fetch skipped for ${entry.resourceId}: ${(error as Error).message}`);
+      }
+    }
+  }
+  return wakes;
+}
+
+function describeWatch(w: WatchRecord) {
+  return {
+    watchId: w.watchId,
+    kind: w.kind,
+    ...(w.conversationId ? { conversationId: w.conversationId } : {}),
+    ...(w.chatId ? { chatId: w.chatId } : {}),
+    ...(w.fromFilter ? { from: w.fromFilter } : {}),
+    ...(w.note ? { note: w.note } : {}),
+    ...(w.context ? { context: w.context } : {}),
+    subscriptionId: w.subscriptionId,
+    createdAt: new Date(w.createdAt).toISOString(),
+    matchedCount: w.matchedCount,
+  };
+}
+
 export interface RegisterHooks {
   isToolEnabled: (name: string) => boolean;
   readOnly: boolean;
@@ -219,67 +488,18 @@ export function registerNotificationTools(
           const resolved = resolveResource(resource);
           if ('error' in resolved) return jsonResult({ error: resolved.error }, true);
 
-          const base = callbackBase();
-          if (!base) {
-            return jsonResult(
-              {
-                error:
-                  'No public callback URL available. Microsoft Graph must be able to reach this ' +
-                  'server over HTTPS; set MS365_MCP_PUBLIC_URL to the public base URL.',
-              },
-              true
-            );
-          }
-          if (!base.startsWith('https://')) {
-            return jsonResult(
-              { error: `Callback URL must be HTTPS; resolved '${base}'.` },
-              true
-            );
-          }
-
-          const clientState = newClientState();
-          const minutes = EXPIRY_MINUTES[resolved.family];
-          const expirationDateTime = new Date(Date.now() + minutes * 60_000).toISOString();
-
           try {
-            const created = (await graphClient.makeRequest('/subscriptions', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                changeType: changeType?.trim() || 'created',
-                notificationUrl: `${base}/graph-notifications`,
-                // Required by Graph for Teams resources whenever expiry is more
-                // than an hour out; harmless and useful elsewhere, since it is
-                // how we learn a subscription needs reauthorization or was removed.
-                lifecycleNotificationUrl: `${base}/graph-lifecycle`,
-                resource: resolved.resource,
-                expirationDateTime,
-                clientState,
-                includeResourceData: false,
-              }),
-            })) as { id?: string; expirationDateTime?: string };
-
-            if (!created?.id) {
-              return jsonResult(
-                { error: 'Graph did not return a subscription id.', response: created },
-                true
-              );
-            }
-
-            const record: SubscriptionRecord = {
-              subscriptionId: created.id,
-              ownerOid: actor.oid,
-              ownerUpn: actor.upn,
-              resource: resolved.resource,
-              friendly: resource.trim(),
-              changeType: changeType?.trim() || 'created',
-              clientState,
-              expiresAt: Date.parse(created.expirationDateTime ?? expirationDateTime),
-            };
-            registerSubscription(record);
+            const result = await createSubscription(
+              graphClient,
+              { oid: actor.oid, upn: actor.upn },
+              resolved,
+              resource.trim(),
+              changeType?.trim() || 'created'
+            );
+            if ('error' in result) return jsonResult({ error: result.error }, true);
 
             return jsonResult({
-              ...describe(record),
+              ...describe(result.record),
               note:
                 'Notifications accumulate server-side. Drain them with check-notifications, or ' +
                 'block cheaply with wait-for-notifications. This does not work across closed ' +
@@ -391,9 +611,15 @@ export function registerNotificationTools(
           if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
           await renewDueSubscriptions(graphClient, actor.oid);
           const result = drain(actor.oid, subscriptionId?.trim() || undefined);
+          // Annotate, never suppress: entries answering a registered watch also
+          // appear as wakes, carrying the watch's note.
+          const wakes = result.notifications.length
+            ? await matchWatches(graphClient, actor.oid, result.notifications)
+            : [];
           return jsonResult({
             count: result.notifications.length,
             notifications: result.notifications,
+            ...(wakes.length ? { wakes } : {}),
             ...(result.dropped ? { droppedOldest: result.dropped } : {}),
             ...(result.lapsedSubscriptions.length
               ? {
@@ -419,7 +645,12 @@ export function registerNotificationTools(
         'The timeout is a ceiling on how long this waits, NOT a window on what it returns: ' +
         'anything already queued comes back immediately, including events from before the ' +
         'call. Pass subscriptionId to wait on one subscription only — otherwise a wait ' +
-        'intended for a chat will also return, and consume, your queued mail notifications.',
+        'intended for a chat will also return, and consume, your queued mail notifications.\n\n' +
+        'Pass watchId (from watch-for-reply) for a QUIET wait on one correspondence: the call ' +
+        'returns a wake only when the watched conversation is actually answered, and other ' +
+        'notifications stay queued for their own consumers. Loop it: each empty cycle costs ' +
+        'a few tokens, and a wake arrives carrying the note you set, so you can resume ' +
+        'mid-task without re-deriving why you were waiting.',
       {
         timeoutSeconds: z
           .number()
@@ -435,13 +666,20 @@ export function registerNotificationTools(
             'Only wake for notifications from this subscription; others stay queued. ' +
               'Omit to wait on all of them.'
           ),
+        watchId: z
+          .string()
+          .optional()
+          .describe(
+            'Quiet mode: only return when this watch (from watch-for-reply) matches a reply. ' +
+              'Overrides subscriptionId.'
+          ),
       },
       {
         title: 'wait-for-notifications',
         readOnlyHint: true,
         openWorldHint: false,
       },
-      async ({ timeoutSeconds, subscriptionId }) =>
+      async ({ timeoutSeconds, subscriptionId, watchId }) =>
         withUsageLog('wait-for-notifications', async () => {
           const actor = getRequestActor();
           if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
@@ -449,17 +687,291 @@ export function registerNotificationTools(
           // Capped below the client's tool-call timeout so a quiet period
           // returns cleanly instead of erroring.
           const seconds = Math.min(timeoutSeconds ?? 45, 50);
-          const notifications = await waitForNotifications(
-            actor.oid,
-            seconds * 1000,
-            subscriptionId?.trim() || undefined
-          );
+
+          const watch = watchId?.trim() ? getWatch(watchId.trim(), actor.oid) : undefined;
+          if (watchId?.trim() && !watch) {
+            return jsonResult(
+              {
+                error:
+                  `No watch '${watchId.trim()}' is registered to you. Watches do not survive ` +
+                  'a connector restart — list-watches shows what exists, and watch-for-reply ' +
+                  're-creates one.',
+              },
+              true
+            );
+          }
+
+          if (!watch) {
+            const notifications = await waitForNotifications(
+              actor.oid,
+              seconds * 1000,
+              subscriptionId?.trim() || undefined
+            );
+            // Annotate, never suppress: a generic drain still returns every
+            // entry, and any that answer a registered watch also appear as
+            // wakes so the agent need not correlate by hand.
+            const wakes = notifications.length
+              ? await matchWatches(graphClient, actor.oid, notifications)
+              : [];
+            return jsonResult({
+              count: notifications.length,
+              notifications,
+              ...(wakes.length ? { wakes } : {}),
+              timedOut: notifications.length === 0,
+              waitedSeconds: seconds,
+            });
+          }
+
+          // Watch-scoped wait: quiet until the watched correspondence is
+          // actually answered. Entries drained along the way that do not match
+          // belong to generic consumers — they are held for the duration of the
+          // call and put back afterwards, which is also what prevents a
+          // requeue-wake spin.
+          const deadline = Date.now() + seconds * 1000;
+          const held: NotificationEntry[] = [];
+          try {
+            while (Date.now() < deadline) {
+              const entries = await waitForNotifications(
+                actor.oid,
+                deadline - Date.now(),
+                watch.subscriptionId
+              );
+              if (!entries.length) break; // timed out inside the store
+              const wakes = await matchWatches(graphClient, actor.oid, entries);
+              const wokenIds = new Set(wakes.map((w) => w.messageId));
+              held.push(...entries.filter((e) => !e.resourceId || !wokenIds.has(e.resourceId)));
+              if (wakes.length) {
+                return jsonResult({
+                  wakes,
+                  watchId: watch.watchId,
+                  timedOut: false,
+                  waitedSeconds: seconds,
+                  note:
+                    'The watched correspondence was answered. Fetch the message for full ' +
+                    'content; the watch stays active for further replies until cancelled.',
+                });
+              }
+            }
+            return jsonResult({
+              wakes: [],
+              watch: describeWatch(watch),
+              timedOut: true,
+              waitedSeconds: seconds,
+              note:
+                'No reply yet on the watched correspondence. Call again with the same watchId ' +
+                'to keep waiting — each quiet cycle costs a few tokens.',
+            });
+          } finally {
+            requeue(actor.oid, held);
+          }
+        })
+    );
+  });
+
+  // --- watch-for-reply ------------------------------------------------------
+  register('watch-for-reply', true, () => {
+    server.tool(
+      'watch-for-reply',
+      'Watch one correspondence for an answer — "I just sent this; tell me when it is ' +
+        'replied to." Give it the email you sent (messageId) or the Teams chat you wrote in ' +
+        '(chatId), optionally who must answer (from), and a short note saying why you are ' +
+        'waiting. Then loop wait-for-notifications with the returned watchId: the wait stays ' +
+        'quiet through unrelated activity and returns only when that conversation is actually ' +
+        'answered, echoing your note so you can resume mid-task.\n\n' +
+        'Flow: send-mail / send-chat-message → watch-for-reply → wait-for-notifications ' +
+        '(watchId, looped) → on wake, get-mail-message or get-chat-message with the returned ' +
+        'id.\n\n' +
+        'Works only while a session is open to do the waiting — nothing can wake a closed ' +
+        'conversation. Watches live in memory: a connector restart clears them, and ' +
+        'list-watches shows what survives.',
+      {
+        messageId: z
+          .string()
+          .optional()
+          .describe(
+            'Watch a mail conversation: the id of a message in the thread — typically the ' +
+              'one you just sent or are replying to. Its conversation is what gets watched.'
+          ),
+        chatId: z
+          .string()
+          .optional()
+          .describe('Watch a Teams chat instead: the chat whose next reply matters.'),
+        from: z
+          .string()
+          .optional()
+          .describe(
+            'Only wake for this sender. Mail: their SMTP address. Chat: their display name ' +
+              'or user id. Omit to wake for any reply that is not your own.'
+          ),
+        note: z
+          .string()
+          .max(300)
+          .optional()
+          .describe(
+            'Why you are waiting, in your own words — echoed verbatim on the wake, e.g. ' +
+              '"Tiffany, sign-off on the connector rollout".'
+          ),
+      },
+      {
+        title: 'watch-for-reply',
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: true,
+      },
+      async (params) =>
+        withUsageLog('watch-for-reply', async () => {
+          const actor = getRequestActor();
+          if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
+
+          const messageId = params.messageId?.trim();
+          const chatId = params.chatId?.trim();
+          if (!messageId === !chatId) {
+            return jsonResult(
+              { error: 'Pass exactly one of messageId (mail) or chatId (Teams chat).' },
+              true
+            );
+          }
+
+          let watch: WatchRecord;
+          if (messageId) {
+            let msg: { conversationId?: string; subject?: string };
+            try {
+              msg = (await graphClient.makeRequest(
+                `/me/messages/${messageId}?$select=conversationId,subject`
+              )) as { conversationId?: string; subject?: string };
+            } catch (error) {
+              return jsonResult(
+                { error: `Could not read message '${messageId}': ${(error as Error).message}` },
+                true
+              );
+            }
+            if (!msg?.conversationId) {
+              return jsonResult(
+                { error: 'The message has no conversationId; cannot watch its thread.' },
+                true
+              );
+            }
+            const sub = await ensureSubscription(
+              graphClient,
+              { oid: actor.oid, upn: actor.upn },
+              'inbox'
+            );
+            if ('error' in sub) return jsonResult({ error: sub.error }, true);
+            watch = {
+              watchId: newWatchId(),
+              ownerOid: actor.oid,
+              subscriptionId: sub.record.subscriptionId,
+              kind: 'mail',
+              conversationId: msg.conversationId,
+              fromFilter: params.from?.trim() || undefined,
+              note: params.note?.trim() || undefined,
+              context: msg.subject,
+              createdAt: Date.now(),
+              matchedCount: 0,
+            };
+          } else {
+            // Confirm the chat exists and capture its topic for the wake.
+            let topic: string | undefined;
+            try {
+              const chat = (await graphClient.makeRequest(
+                `/chats/${chatId}?$select=id,topic`
+              )) as { topic?: string };
+              topic = chat?.topic ?? undefined;
+            } catch (error) {
+              return jsonResult(
+                { error: `Could not read chat '${chatId}': ${(error as Error).message}` },
+                true
+              );
+            }
+            const sub = await ensureSubscription(
+              graphClient,
+              { oid: actor.oid, upn: actor.upn },
+              `chat:${chatId}`
+            );
+            if ('error' in sub) return jsonResult({ error: sub.error }, true);
+            watch = {
+              watchId: newWatchId(),
+              ownerOid: actor.oid,
+              subscriptionId: sub.record.subscriptionId,
+              kind: 'chat',
+              chatId,
+              fromFilter: params.from?.trim() || undefined,
+              note: params.note?.trim() || undefined,
+              context: topic,
+              createdAt: Date.now(),
+              matchedCount: 0,
+            };
+          }
+
+          const registered = registerWatch(watch);
+          if (registered.error) return jsonResult({ error: registered.error }, true);
+
           return jsonResult({
-            count: notifications.length,
-            notifications,
-            timedOut: notifications.length === 0,
-            waitedSeconds: seconds,
+            ...describeWatch(watch),
+            subscriptionExpiresAt: new Date(
+              listSubscriptions(actor.oid).find(
+                (r) => r.subscriptionId === watch.subscriptionId
+              )?.expiresAt ?? Date.now()
+            ).toISOString(),
+            next:
+              `Loop wait-for-notifications with watchId '${watch.watchId}'. Each quiet cycle ` +
+              'is cheap; the wake carries your note and the reply’s id.',
           });
+        })
+    );
+  });
+
+  // --- list-watches ---------------------------------------------------------
+  register('list-watches', false, () => {
+    server.tool(
+      'list-watches',
+      'Lists your active correspondence watches (from watch-for-reply): what each is ' +
+        'watching, its note, and how many replies it has matched. Watches live in memory and ' +
+        'do not survive a connector restart.',
+      {},
+      {
+        title: 'list-watches',
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
+      async () =>
+        withUsageLog('list-watches', async () => {
+          const actor = getRequestActor();
+          if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
+          const mine = listWatches(actor.oid).map(describeWatch);
+          return jsonResult({ count: mine.length, watches: mine });
+        })
+    );
+  });
+
+  // --- cancel-watch ---------------------------------------------------------
+  register('cancel-watch', true, () => {
+    server.tool(
+      'cancel-watch',
+      'Cancels one correspondence watch. The underlying subscription stays (other watches ' +
+        'or generic notification consumers may share it) — use unsubscribe-from-changes to ' +
+        'remove that too.',
+      {
+        watchId: z.string().min(1).describe('The watch to cancel, from watch-for-reply.'),
+      },
+      {
+        title: 'cancel-watch',
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+      },
+      async ({ watchId }) =>
+        withUsageLog('cancel-watch', async () => {
+          const actor = getRequestActor();
+          if (!actor?.oid) return jsonResult({ error: NO_IDENTITY }, true);
+          const id = watchId.trim();
+          if (!cancelWatch(id, actor.oid)) {
+            return jsonResult(
+              { error: `No watch '${id}' is registered to you on this connector.` },
+              true
+            );
+          }
+          return jsonResult({ watchId: id, cancelled: true });
         })
     );
   });

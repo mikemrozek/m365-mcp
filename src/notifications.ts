@@ -42,6 +42,37 @@ export interface SubscriptionRecord {
   lapsedReason?: string;
 }
 
+/**
+ * A correspondence watch: "wake me when THIS conversation gets an answer",
+ * layered on top of a subscription (tsq.20, Correspondence Watch).
+ *
+ * A subscription watches a container (an inbox, a chat); a watch narrows that
+ * to one correspondence — a mail conversation, or a chat partner — plus an
+ * optional sender filter. Matching happens at drain time in the tool layer,
+ * because deciding whether a changed item belongs to the watched conversation
+ * requires fetching it, and a delegated token only exists during the owner's
+ * own call. This module stores the intent; it still holds no credentials.
+ */
+export interface WatchRecord {
+  watchId: string;
+  ownerOid: string;
+  /** The subscription whose notifications this watch filters. */
+  subscriptionId: string;
+  kind: 'mail' | 'chat';
+  /** Mail: the conversationId a reply must belong to. */
+  conversationId?: string;
+  /** Chat: the chat whose messages are watched (redundant with the subscription, kept for output). */
+  chatId?: string;
+  /** Optional sender filter: SMTP address (mail) or user id / display name (chat). */
+  fromFilter?: string;
+  /** Free text from the caller, echoed verbatim on the wake — the "why was I waiting". */
+  note?: string;
+  /** Human context captured at creation: mail subject or chat topic. */
+  context?: string;
+  createdAt: number;
+  matchedCount: number;
+}
+
 /** One received notification, reduced to a pointer. Never carries content. */
 export interface NotificationEntry {
   subscriptionId: string;
@@ -78,6 +109,14 @@ const MAX_QUEUE_PER_USER = 200;
 const registry = new Map<string, SubscriptionRecord>();
 const queues = new Map<string, UserQueue>();
 const waiters = new Map<string, Waiter[]>();
+const watches = new Map<string, WatchRecord>();
+
+/**
+ * Cap per user. A watch is a few hundred bytes of intent; twenty concurrent
+ * awaited answers is already an unusual working style, and the cap bounds a
+ * runaway agent registering watches in a loop.
+ */
+const MAX_WATCHES_PER_USER = 20;
 
 /** Notifications received for a subscription we don't know about (post-restart). */
 let unknownDeliveries = 0;
@@ -119,6 +158,11 @@ export function unregisterSubscription(subscriptionId: string, ownerOid: string)
   const record = registry.get(subscriptionId);
   if (!record || record.ownerOid !== ownerOid) return false;
   registry.delete(subscriptionId);
+
+  // A watch is meaningless without its subscription — cancel any that rode on it.
+  for (const [watchId, w] of watches) {
+    if (w.subscriptionId === subscriptionId && w.ownerOid === ownerOid) watches.delete(watchId);
+  }
 
   // Purge anything this subscription already queued. Without this, entries that
   // arrived before the cancel survive in memory and surface on some later drain
@@ -322,6 +366,80 @@ export function waitForNotifications(
   });
 }
 
+// --- correspondence watches (tsq.20) ----------------------------------------
+
+export function newWatchId(): string {
+  return `w-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+/** Registers a watch. Returns an error string instead of throwing on the cap. */
+export function registerWatch(record: WatchRecord): { error?: string } {
+  const mine = [...watches.values()].filter((w) => w.ownerOid === record.ownerOid);
+  if (mine.length >= MAX_WATCHES_PER_USER) {
+    return {
+      error:
+        `You already have ${mine.length} active watches (the maximum). Cancel one with ` +
+        'cancel-watch, or let its subscription expire.',
+    };
+  }
+  watches.set(record.watchId, record);
+  logger.info(
+    `Registered watch ${record.watchId} (${record.kind}) on subscription ` +
+      `${record.subscriptionId} for ${record.ownerOid}`
+  );
+  return {};
+}
+
+export function getWatch(watchId: string, ownerOid: string): WatchRecord | undefined {
+  const w = watches.get(watchId);
+  return w && w.ownerOid === ownerOid ? w : undefined;
+}
+
+/** Watches owned by a user. */
+export function listWatches(ownerOid: string): WatchRecord[] {
+  return [...watches.values()].filter((w) => w.ownerOid === ownerOid);
+}
+
+/** Watches riding on one subscription, for drain-time matching. */
+export function watchesForSubscription(subscriptionId: string, ownerOid: string): WatchRecord[] {
+  return [...watches.values()].filter(
+    (w) => w.subscriptionId === subscriptionId && w.ownerOid === ownerOid
+  );
+}
+
+/** Removes a watch, but only if the caller owns it. The subscription stays. */
+export function cancelWatch(watchId: string, ownerOid: string): boolean {
+  const w = watches.get(watchId);
+  if (!w || w.ownerOid !== ownerOid) return false;
+  watches.delete(watchId);
+  return true;
+}
+
+export function recordWatchMatch(watchId: string): void {
+  const w = watches.get(watchId);
+  if (w) w.matchedCount++;
+}
+
+/**
+ * Puts entries back at the FRONT of the owner's queue without waking waiters.
+ *
+ * Used by watch-scoped waits: entries drained during the wait that did not
+ * match the watch belong to generic consumers, so they are held aside for the
+ * duration of the call and restored here. Not waking waiters is what prevents
+ * the obvious spin — a requeue that woke the very waiter that is requeueing
+ * would drain the same entries forever.
+ */
+export function requeue(ownerOid: string, entries: NotificationEntry[]): void {
+  if (!entries.length) return;
+  const q = queueFor(ownerOid);
+  q.entries.unshift(...entries);
+  if (q.entries.length > MAX_QUEUE_PER_USER) {
+    const overflow = q.entries.length - MAX_QUEUE_PER_USER;
+    q.entries.splice(MAX_QUEUE_PER_USER, overflow);
+    q.dropped += overflow;
+  }
+}
+
 /** Diagnostics for logging and tests. */
 export function stats(): {
   subscriptions: number;
@@ -345,5 +463,6 @@ export function __resetForTests(): void {
   queues.clear();
   for (const list of waiters.values()) for (const w of list) clearTimeout(w.timer);
   waiters.clear();
+  watches.clear();
   unknownDeliveries = 0;
 }

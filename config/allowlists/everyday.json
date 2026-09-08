@@ -5,6 +5,7 @@
     "accept-calendar-event",
     "attach-file",
     "cancel-calendar-event",
+    "cancel-watch",
     "check-notifications",
     "copy-mail-message",
     "create-calendar",
@@ -98,6 +99,7 @@
     "list-team-channels",
     "list-user-direct-reports",
     "list-users",
+    "list-watches",
     "move-mail-message",
     "parse-teams-url",
     "put-file",
@@ -123,6 +125,7 @@
     "update-mail-message",
     "update-mail-rule",
     "update-specific-calendar-event",
-    "wait-for-notifications"
+    "wait-for-notifications",
+    "watch-for-reply"
   ]
 }

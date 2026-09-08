@@ -76,8 +76,9 @@ describe('advertised tool descriptions', () => {
   it('registers the whole everyday allowlist', async () => {
     const tools = await registerAllowlistedTools();
     // 124 shipped in tsq.18; tsq.19 removed add-mail-attachment and
-    // create-mail-attachment-upload-session (superseded by attach-file/put-file).
-    expect(tools.length).toBe(122);
+    // create-mail-attachment-upload-session (superseded by attach-file/put-file);
+    // tsq.20 added watch-for-reply, list-watches, cancel-watch (Correspondence Watch).
+    expect(tools.length).toBe(125);
   });
 
   it('never opens with prose describing a different operation', async () => {

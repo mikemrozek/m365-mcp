@@ -72,6 +72,7 @@ const CUSTOM_TOOLS_READ_ONLY = [
   'list-my-subscriptions',
   'check-notifications',
   'wait-for-notifications',
+  'list-watches',
   'read-mail-attachment-text',
   'read-onedrive-file-text',
 ];
@@ -82,6 +83,8 @@ const CUSTOM_TOOLS_ALL = [
   'download-mail-attachment',
   'subscribe-to-changes',
   'unsubscribe-from-changes',
+  'watch-for-reply',
+  'cancel-watch',
   'get-file',
   'attach-file',
   'put-file',
