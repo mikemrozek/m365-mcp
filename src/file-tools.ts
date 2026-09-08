@@ -302,11 +302,22 @@ export function registerFileTools(
 
           const odataType = meta?.['@odata.type'] ?? '';
           if (odataType && !odataType.includes('fileAttachment')) {
+            // The old text here recommended get-mail-attachment — retired in
+            // tsq.18, so from 09-02 this path pointed at a tool that answers
+            // "Tool not found". Found via Robert's 09-05 attachment sweep.
+            const isReference = odataType.includes('referenceAttachment');
+            const sourceUrl = (meta as { sourceUrl?: string }).sourceUrl;
             return jsonResult(
               {
-                error:
-                  `This is a ${odataType}, which has no file content. Use get-mail-attachment ` +
-                  `to inspect it.`,
+                error: isReference
+                  ? `'${meta?.name ?? 'attachment'}' is a LINK to a file in OneDrive/SharePoint, ` +
+                    'not the file itself. Fetch the target instead: use the sourceUrl below, or ' +
+                    'search-onedrive-files by name. Expected in a sweep — skip and carry on.'
+                  : `'${meta?.name ?? 'attachment'}' is a ${odataType.replace('#microsoft.graph.', '')} — ` +
+                    'an attached email or calendar item, not a file. There is nothing to ' +
+                    'download; describe it to the user instead. Expected in a sweep — skip ' +
+                    'and carry on.',
+                ...(sourceUrl ? { sourceUrl } : {}),
               },
               true
             );

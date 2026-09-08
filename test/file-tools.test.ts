@@ -268,7 +268,7 @@ describe('get-file routing', () => {
     expect(payload.error).toMatch(/list-folder-files/);
   });
 
-  it('rejects a non-file attachment type', async () => {
+  it('rejects an item attachment without recommending a retired tool', async () => {
     makeRequest.mockResolvedValueOnce({
       '@odata.type': '#microsoft.graph.itemAttachment',
       name: 'embedded',
@@ -280,7 +280,27 @@ describe('get-file routing', () => {
     });
 
     expect(isError).toBe(true);
-    expect(payload.error).toMatch(/get-mail-attachment/);
+    expect(payload.error).toMatch(/attached email or calendar item/);
+    // get-mail-attachment was retired in tsq.18; guidance must not point at it.
+    expect(payload.error).not.toMatch(/get-mail-attachment/);
+  });
+
+  it('hands back the sourceUrl for a reference attachment', async () => {
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.referenceAttachment',
+      name: 'Q3 deck.pptx',
+      sourceUrl: 'https://example.sharepoint.com/doc',
+    });
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'get-file', {
+      messageId: 'm1',
+      attachmentId: 'a1',
+    });
+
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/LINK to a file/);
+    expect(payload.error).not.toMatch(/get-mail-attachment/);
+    expect(payload.sourceUrl).toBe('https://example.sharepoint.com/doc');
   });
 
   it('explains what to supply when given nothing identifying', async () => {
