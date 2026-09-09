@@ -687,6 +687,11 @@ export function registerNotificationTools(
           // Capped below the client's tool-call timeout so a quiet period
           // returns cleanly instead of erroring.
           const seconds = Math.min(timeoutSeconds ?? 45, 50);
+          // Actual elapsed, so waitedSeconds means what it says: a small value
+          // with timedOut:false is a prompt wake; a value near the ceiling is
+          // Graph delivery latency, not this server holding the notification.
+          const startedAt = Date.now();
+          const elapsed = () => Math.round((Date.now() - startedAt) / 1000);
 
           const watch = watchId?.trim() ? getWatch(watchId.trim(), actor.oid) : undefined;
           if (watchId?.trim() && !watch) {
@@ -718,7 +723,7 @@ export function registerNotificationTools(
               notifications,
               ...(wakes.length ? { wakes } : {}),
               timedOut: notifications.length === 0,
-              waitedSeconds: seconds,
+              waitedSeconds: elapsed(),
             });
           }
 
@@ -745,7 +750,7 @@ export function registerNotificationTools(
                   wakes,
                   watchId: watch.watchId,
                   timedOut: false,
-                  waitedSeconds: seconds,
+                  waitedSeconds: elapsed(),
                   note:
                     'The watched correspondence was answered. Fetch the message for full ' +
                     'content; the watch stays active for further replies until cancelled.',
@@ -756,7 +761,7 @@ export function registerNotificationTools(
               wakes: [],
               watch: describeWatch(watch),
               timedOut: true,
-              waitedSeconds: seconds,
+              waitedSeconds: elapsed(),
               note:
                 'No reply yet on the watched correspondence. Call again with the same watchId ' +
                 'to keep waiting — each quiet cycle costs a few tokens.',
