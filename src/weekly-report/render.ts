@@ -11,7 +11,9 @@
 import type { Report, ToolLine, UserLine } from './analyze.js';
 
 /**
- * Segoe UI 11pt throughout, tables included.
+ * Aptos 11pt throughout, tables included (Segoe UI as the fallback where Aptos
+ * is not installed — Aptos is the Office default since 2023, so most of the
+ * audience gets it).
  *
  * The family and size are repeated on the table and on every cell rather than left to
  * inherit: Outlook and most webmail reset fonts inside table elements, so a single
@@ -22,7 +24,7 @@ import type { Report, ToolLine, UserLine } from './analyze.js';
 // A single-quoted style attribute holding a single-quoted font family terminates at
 // the first inner quote and drops the rest of the declaration — silently, and only in
 // the mail client rather than in any preview. Hence double quotes on every attribute.
-const FONT_STACK = "font-family:'Segoe UI',Segoe,Tahoma,Arial,sans-serif;font-size:11pt";
+const FONT_STACK = "font-family:Aptos,'Segoe UI',Segoe,Tahoma,Arial,sans-serif;font-size:11pt";
 const FONT = `${FONT_STACK};line-height:1.5;color:#202020`;
 const TABLE = `border-collapse:collapse;margin:8px 0;${FONT_STACK}`;
 const CELL = `border:1px solid #d0d0d0;padding:6px 10px;text-align:left;${FONT_STACK}`;
@@ -55,7 +57,11 @@ function rate(errors: number, calls: number): string {
 }
 
 function table(headers: string[], rows: string[][]): string {
-  const head = headers.map((h) => `<th style="${CELL};background:#f4f4f4'>${h}</th>`).join('');
+  // The closing quote here was a single quote until tsq.21 — an unterminated
+  // style attribute that swallowed header markup in mail clients, which is
+  // what made the tables look faint. Exactly the failure the comment at the
+  // top of this file warns about.
+  const head = headers.map((h) => `<th style="${CELL};background:#f4f4f4">${h}</th>`).join('');
   const body = rows
     .map((r) => `<tr>${r.map((c) => `<td style="${CELL}">${c}</td>`).join('')}</tr>`)
     .join('');
@@ -80,13 +86,22 @@ function toolRows(tools: ToolLine[]): string[][] {
   ]);
 }
 
-/** "31 August" -> "August 31", the way the subject line reads. */
-function monthDay(date: Date): string {
-  return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+/** 1 -> "1st", 4 -> "4th", 22 -> "22nd" — the way the subject line reads. */
+function ordinal(n: number): string {
+  const suffixes = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return `${n}${suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]}`;
 }
 
+/**
+ * "M365 MCP connector Weekly Update for September 4th, 2026" — Mike's requested
+ * form, 2026-09-09. The headline moved out of the subject and into the log line;
+ * the body's "Worth a look" section carries the substance.
+ */
 export function renderSubject(report: Report): string {
-  return `M365 Connector: ${monthDay(report.window.from)} to ${monthDay(report.window.to)}, ${report.headline}`;
+  const d = report.window.to;
+  const month = d.toLocaleDateString('en-US', { month: 'long' });
+  return `M365 MCP connector Weekly Update for ${month} ${ordinal(d.getDate())}, ${d.getFullYear()}`;
 }
 
 export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}): string {
@@ -166,6 +181,7 @@ export function renderLogLine(report: Report): string {
   return (
     `calls=${report.current.calls} (prior ${report.prior.calls}) ` +
     `errors=${report.current.errors} users=${report.current.users} ` +
-    `tools=${report.current.tools} anomalies=${report.anomalies.length}`
+    `tools=${report.current.tools} anomalies=${report.anomalies.length} ` +
+    `headline="${report.headline}"`
   );
 }

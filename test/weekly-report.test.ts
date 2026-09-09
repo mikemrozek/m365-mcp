@@ -129,14 +129,30 @@ describe('rendering', () => {
     row(2, { upn: 'here@x.com', tool: 'send-mail', outcome: 'error' }),
   ]);
 
-  it('names the window and the single most notable thing in the subject', () => {
+  it('titles the mail as the weekly update for the window-end date', () => {
     const busy = build([
       ...Array.from({ length: 400 }, () => row(9, { upn: 'laura.mirarchi@x.com' })),
       ...Array.from({ length: 3 }, () => row(1, { upn: 'here@x.com' })),
     ]);
-    expect(renderSubject(busy)).toBe(
-      'M365 Connector: September 1 to September 8, Laura stopped after 400 calls'
-    );
+    // Mike's requested form (2026-09-09); the headline lives in report.headline
+    // and the log line now, not the subject.
+    expect(renderSubject(busy)).toBe('M365 MCP connector Weekly Update for September 8th, 2026');
+    expect(busy.headline).toBe('Laura stopped after 400 calls');
+  });
+
+  it('spells ordinals the way a person would', () => {
+    const at = (day: number) =>
+      renderSubject(
+        buildReport([row(1)], {
+          now: new Date(`2026-09-${String(day).padStart(2, '0')}T12:00:00Z`),
+          windowDays: 7,
+        })
+      );
+    expect(at(1)).toContain('September 1st, 2026');
+    expect(at(2)).toContain('September 2nd, 2026');
+    expect(at(3)).toContain('September 3rd, 2026');
+    expect(at(11)).toContain('September 11th, 2026');
+    expect(at(22)).toContain('September 22nd, 2026');
   });
 
   it('prefers a failing capability over a departed user in the headline', () => {
@@ -146,7 +162,7 @@ describe('rendering', () => {
         row(1, { tool: 'move-mail-message', outcome: i < 6 ? 'error' : 'success' })
       ),
     ];
-    expect(renderSubject(build(rows))).toContain('move-mail-message failing 60% of the time');
+    expect(build(rows).headline).toContain('move-mail-message failing 60% of the time');
   });
 
   it('says nothing unusual when there is nothing unusual', () => {
@@ -154,21 +170,29 @@ describe('rendering', () => {
       ...Array.from({ length: 5 }, () => row(9)),
       ...Array.from({ length: 5 }, () => row(1)),
     ]);
-    expect(renderSubject(quiet)).toContain('nothing unusual');
+    expect(quiet.headline).toContain('nothing unusual');
     expect(renderHtml(quiet)).toContain('Nothing unusual this week');
   });
 
-  it('sets Segoe UI 11pt on the body, the table and every cell', () => {
+  it('sets Aptos 11pt on the body, the table and every cell', () => {
     const html = renderHtml(report);
     // Mail clients reset fonts inside tables, so inheritance is not enough.
-    expect(html).toContain("font-family:'Segoe UI'");
+    expect(html).toContain('font-family:Aptos');
     const cells = html.match(/<td style="[^"]*"/g) ?? [];
     expect(cells.length).toBeGreaterThan(0);
     for (const cell of cells) {
       expect(cell).toContain('font-size:11pt');
-      expect(cell).toContain("'Segoe UI'");
+      expect(cell).toContain('Aptos');
       // A single-quoted attribute would be terminated by the quoted family name.
       expect(cell.startsWith('<td style="')).toBe(true);
+    }
+    // Header cells too — until tsq.21 the th style attribute never closed (a
+    // single quote where a double belonged), so headers rendered unstyled.
+    const headers = html.match(/<th style="[^"]*">/g) ?? [];
+    expect(headers.length).toBeGreaterThan(0);
+    for (const th of headers) {
+      expect(th).toContain('Aptos');
+      expect(th).not.toContain("'>");
     }
     expect(html).not.toContain('font-size:13px');
     expect(html).not.toContain('font-size:14px');
