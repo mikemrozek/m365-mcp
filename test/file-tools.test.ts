@@ -516,6 +516,62 @@ describe('attach-file size routing', () => {
     });
     expect(payload.name).toBe('Invoice March.pdf');
   });
+
+  // tsq.22 — the no-OneDrive local-file path Scott asked for.
+  it('attaches a local file from contentBase64 with no OneDrive round-trip', async () => {
+    const bytes = Buffer.from('a local report, attached directly');
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'attach-file', {
+      draftMessageId: 'draft1',
+      contentBase64: bytes.toString('base64'),
+      name: 'report.pdf',
+    });
+
+    expect(payload.route).toBe('direct');
+    expect(payload.name).toBe('report.pdf');
+    expect(payload.sha256).toMatch(/^[a-f0-9]{64}$/);
+    // No source lookup and no drive fetch happened — the point of the feature.
+    expect(fetchBinary).not.toHaveBeenCalled();
+    // The one call is the direct fileAttachment POST, carrying our bytes and a
+    // MIME type inferred from the extension.
+    const [endpoint, opts] = makeRequest.mock.calls[0];
+    expect(endpoint).toContain('/attachments');
+    const body = JSON.parse(opts.body);
+    expect(body['@odata.type']).toBe('#microsoft.graph.fileAttachment');
+    expect(body.contentType).toBe('application/pdf');
+    expect(Buffer.from(body.contentBytes, 'base64').toString()).toBe(bytes.toString());
+  });
+
+  it('requires a name when attaching inline bytes', async () => {
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'attach-file', {
+      draftMessageId: 'd',
+      contentBase64: Buffer.from('x').toString('base64'),
+    });
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/name is required/);
+  });
+
+  it('rejects an inline attachment over the 256 KB cap and points at put-file', async () => {
+    const tooBig = Buffer.alloc(256 * 1024 + 1).toString('base64');
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'attach-file', {
+      draftMessageId: 'd',
+      contentBase64: tooBig,
+      name: 'big.pdf',
+    });
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/put-file/);
+    expect(makeRequest).not.toHaveBeenCalled();
+  });
+
+  it('still explains all three sources when given nothing to attach', async () => {
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'attach-file', { draftMessageId: 'd' });
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/contentBase64/);
+    expect(payload.error).toMatch(/itemId/);
+  });
 });
 
 describe('read-only mode', () => {

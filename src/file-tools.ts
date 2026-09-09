@@ -60,6 +60,44 @@ import {
  */
 const INLINE_UPLOAD_MAX_BYTES = 32 * 1024;
 
+/**
+ * Ceiling on bytes accepted INLINE as an email attachment via attach-file's
+ * contentBase64 (tsq.22). Larger than put-file's 32 KB on purpose: attach-file's
+ * whole value here is skipping the OneDrive round-trip Scott objected to, and a
+ * 32 KB cap would send him back through OneDrive for any real attachment. 256 KB
+ * covers a typical PDF, spreadsheet or CSV at ~90 K tokens of base64 worst case,
+ * which a modern context absorbs; above it the bytes belong on an upload URL
+ * (put-file) rather than in the conversation. Still well under DIRECT_ATTACH_LIMIT,
+ * so an inline attachment always takes the single-POST direct route.
+ */
+const ATTACH_INLINE_MAX_BYTES = 256 * 1024;
+
+/** Minimal extension→MIME map for inline attachments; Graph is forgiving, this is a hint. */
+const MIME_BY_EXT: Record<string, string> = {
+  pdf: 'application/pdf',
+  csv: 'text/csv',
+  txt: 'text/plain',
+  json: 'application/json',
+  html: 'text/html',
+  xml: 'application/xml',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  zip: 'application/zip',
+};
+
+function mimeFromName(name: string): string {
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+  return MIME_BY_EXT[ext] ?? 'application/octet-stream';
+}
+
 /** Ceiling for explicit text extraction; above this a link is the only sane answer. */
 const MAX_EXTRACT_BYTES = 40 * 1024 * 1024;
 
@@ -629,18 +667,31 @@ export function registerFileTools(
     server.tool(
       'attach-file',
       'Attaches a file to an existing draft message, choosing the correct upload route ' +
-        'automatically. Small files are attached directly; larger ones go through a resumable ' +
-        'upload session — Microsoft rejects direct attachment at 3 MB and above, which is why ' +
-        'attaching used to fail on bigger files.\n\n' +
-        'Source the file by itemId (a OneDrive / SharePoint document) or by messageId + ' +
-        'attachmentId (to copy an attachment from another message). The bytes move ' +
-        'server-side and never pass through the conversation.\n\n' +
+        'automatically.\n\n' +
+        'Three ways to source the file:\n' +
+        '  • contentBase64 — a LOCAL file, passed inline (under 256 KB). Attaches straight ' +
+        'to the draft with no OneDrive step. This is the one to use for "attach this file I ' +
+        'have here and send it" — no need to put-file it first.\n' +
+        '  • itemId — a document already in OneDrive / SharePoint.\n' +
+        '  • messageId + attachmentId — copy an attachment from another message.\n\n' +
+        'For itemId / messageId the bytes move server-side and never pass through the ' +
+        'conversation. For a local file ABOVE 256 KB, put-file it (which returns an upload ' +
+        'URL, keeping the bytes out of the conversation) and then attach by the itemId that ' +
+        'returns. Small files attach directly; larger OneDrive/mail sources use a resumable ' +
+        'upload session, since Microsoft rejects direct attachment at 3 MB and above.\n\n' +
         'Flow: create-draft-email (or create-reply-draft) → attach-file → send-draft-message.',
       {
         draftMessageId: z
           .string()
           .min(1)
           .describe('The draft to attach to, from create-draft-email or create-reply-draft.'),
+        contentBase64: z
+          .string()
+          .optional()
+          .describe(
+            'Source: a local file as base64, under 256 KB. Requires name. No OneDrive round-trip. ' +
+              'Above 256 KB, use put-file then attach by itemId instead.'
+          ),
         itemId: z.string().optional().describe('Source: a OneDrive / SharePoint driveItem id.'),
         driveId: z
           .string()
@@ -664,35 +715,73 @@ export function registerFileTools(
       },
       async (params) =>
         withUsageLog('attach-file', async () => {
-          const source = resolveSource(params);
-          if ('error' in source) {
-            return jsonResult(
-              {
-                error:
-                  'Specify the source file: itemId (a OneDrive/SharePoint file) or ' +
-                  'messageId + attachmentId (an attachment on another message).',
-              },
-              true
-            );
-          }
-
-          const meta = (await graphClient.makeRequest(source.metaPath)) as {
-            name?: string;
-            size?: number;
-            contentType?: string;
-            file?: { mimeType?: string };
-            folder?: unknown;
-          };
-          if (meta?.folder) {
-            return jsonResult({ error: `'${meta.name}' is a folder, not a file.` }, true);
-          }
-
-          const filename = params.name?.trim() || meta?.name || 'attachment';
-          const contentType =
-            meta?.contentType ?? meta?.file?.mimeType ?? 'application/octet-stream';
           const draft = encodeURIComponent(params.draftMessageId.trim());
 
-          const { buffer } = await graphClient.fetchBinary(source.contentPath);
+          let buffer: Buffer;
+          let filename: string;
+          let contentType: string;
+
+          if (params.contentBase64) {
+            // Local file, inline: the no-OneDrive path. Decode here and fall
+            // straight into the same routing a fetched source uses.
+            if (!params.name?.trim()) {
+              return jsonResult(
+                { error: 'name is required when attaching with contentBase64.' },
+                true
+              );
+            }
+            try {
+              buffer = Buffer.from(params.contentBase64, 'base64');
+            } catch {
+              return jsonResult({ error: 'contentBase64 is not valid base64.' }, true);
+            }
+            if (buffer.byteLength === 0) {
+              return jsonResult({ error: 'contentBase64 decoded to zero bytes.' }, true);
+            }
+            if (buffer.byteLength > ATTACH_INLINE_MAX_BYTES) {
+              return jsonResult(
+                {
+                  error:
+                    `File is ${buffer.byteLength} bytes, over the ${ATTACH_INLINE_MAX_BYTES}-byte ` +
+                    'inline attachment limit. put-file it (you get an upload URL, so the bytes ' +
+                    'skip the conversation), then call attach-file again with the itemId that ' +
+                    'returns.',
+                },
+                true
+              );
+            }
+            filename = safeUploadName(params.name);
+            contentType = mimeFromName(filename);
+          } else {
+            const source = resolveSource(params);
+            if ('error' in source) {
+              return jsonResult(
+                {
+                  error:
+                    'Specify the source file: contentBase64 (a local file under 256 KB), ' +
+                    'itemId (a OneDrive/SharePoint file), or messageId + attachmentId (an ' +
+                    'attachment on another message).',
+                },
+                true
+              );
+            }
+
+            const meta = (await graphClient.makeRequest(source.metaPath)) as {
+              name?: string;
+              size?: number;
+              contentType?: string;
+              file?: { mimeType?: string };
+              folder?: unknown;
+            };
+            if (meta?.folder) {
+              return jsonResult({ error: `'${meta.name}' is a folder, not a file.` }, true);
+            }
+
+            filename = params.name?.trim() || meta?.name || 'attachment';
+            contentType = meta?.contentType ?? meta?.file?.mimeType ?? 'application/octet-stream';
+            ({ buffer } = await graphClient.fetchBinary(source.contentPath));
+          }
+
           const size = buffer.byteLength;
           // Hash the bytes we actually send. Graph's reported attachment size
           // includes MIME envelope overhead (~165 bytes observed), so size is
