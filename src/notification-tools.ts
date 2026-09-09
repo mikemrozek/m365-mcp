@@ -8,6 +8,7 @@ import {
   cancelWatch,
   drain,
   dueForRenewal,
+  getSubscription,
   getWatch,
   listSubscriptions,
   listWatches,
@@ -288,7 +289,8 @@ function toPreview(text: string | undefined): string | undefined {
  * item moved or vanished before we looked: not a match, not an error.
  * Fetches are capped and cached per call.
  */
-async function matchWatches(
+// Exported for tests; not part of the tool surface.
+export async function matchWatches(
   graphClient: GraphClient,
   ownerOid: string,
   entries: NotificationEntry[]
@@ -335,6 +337,19 @@ async function matchWatches(
             memoNoMatch(entry, w.watchId);
             continue;
           }
+          if (!w.fromFilter) {
+            // Your own message arriving in your own inbox — a reply-all on a
+            // thread you're also a recipient of, a DL you're on, a self-send —
+            // is not an answer, and without this check it woke the watch
+            // (found in the 09-09 E2E). Compared by sign-in address, so an
+            // alias can still slip through; watching for yourself on purpose
+            // is done explicitly with from: <your address>.
+            const ownerUpn = getSubscription(entry.subscriptionId)?.ownerUpn ?? '';
+            if (ownerUpn && sender.toLowerCase() === ownerUpn.toLowerCase()) {
+              memoNoMatch(entry, w.watchId);
+              continue;
+            }
+          }
           recordWatchMatch(w.watchId);
           wakes.push({
             watchId: w.watchId,
@@ -364,7 +379,9 @@ async function matchWatches(
           const senderName = msg?.from?.user?.displayName ?? '';
           // Your own messages in the chat fire notifications too; a reply-watch
           // must not wake on the very message it is waiting for an answer to.
-          if (!senderId || senderId === ownerOid) {
+          // Exception: a fromFilter naming your own id is an explicit request
+          // to wake on yourself (mirrors the mail path; used by E2E tests).
+          if (!senderId || (senderId === ownerOid && w.fromFilter !== senderId)) {
             memoNoMatch(entry, w.watchId);
             continue;
           }
