@@ -57,3 +57,41 @@ describe('parseTeamsUrl', () => {
     expect(result).toContain('/l/meetup-join/');
   });
 });
+
+describe('threadIdFromTeamsUrl', () => {
+  const THREAD = '19:meeting_NTQ1YjE2ZmYtN2E5MS00ZmM0LWE0YjItYTA2MDJlMTk2Yzg1@thread.v2';
+
+  it('reads the threadId parameter from a recap URL', async () => {
+    const { threadIdFromTeamsUrl } = await import('../src/lib/teams-url-parser.js');
+    const url = `https://teams.microsoft.com/v2/#/meetingrecap?threadId=${encodeURIComponent(THREAD)}&tenantId=t&organizerId=o`;
+    expect(threadIdFromTeamsUrl(url)).toBe(THREAD);
+  });
+
+  it('reads the thread id from the path of a full join URL', async () => {
+    const { threadIdFromTeamsUrl } = await import('../src/lib/teams-url-parser.js');
+    const url = `https://teams.microsoft.com/l/meetup-join/${encodeURIComponent(THREAD).replace(/%3A/gi, '%3a')}/0?context=%7b%22Tid%22%3a%22t%22%7d`;
+    expect(threadIdFromTeamsUrl(url)).toBe(THREAD);
+  });
+
+  it('returns undefined for a short /meet/ link, which carries no thread id', async () => {
+    const { threadIdFromTeamsUrl } = await import('../src/lib/teams-url-parser.js');
+    expect(
+      threadIdFromTeamsUrl('https://teams.microsoft.com/meet/29752586464443?p=abc')
+    ).toBeUndefined();
+  });
+
+  it('refuses a threadId parameter that is not a meeting thread', async () => {
+    const { threadIdFromTeamsUrl } = await import('../src/lib/teams-url-parser.js');
+    expect(threadIdFromTeamsUrl('https://x/?threadId=19%3Aabc%40unq.gbl.spaces')).toBeUndefined();
+  });
+});
+
+describe('isMeetingThreadId', () => {
+  it('accepts a meeting thread and rejects chats and channels', async () => {
+    const { isMeetingThreadId } = await import('../src/lib/teams-url-parser.js');
+    expect(isMeetingThreadId('19:meeting_abc-DEF_123@thread.v2')).toBe(true);
+    expect(isMeetingThreadId('19:abc@unq.gbl.spaces')).toBe(false);
+    expect(isMeetingThreadId('19:abc@thread.skype')).toBe(false);
+    expect(isMeetingThreadId('meeting_abc@thread.v2')).toBe(false);
+  });
+});

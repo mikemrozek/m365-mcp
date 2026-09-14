@@ -36,3 +36,31 @@ export function parseTeamsUrl(url: string): string {
   // Unknown format — return as-is
   return url;
 }
+
+/**
+ * Pull the meeting chat thread id (`19:meeting_…@thread.v2`) out of a Teams URL.
+ *
+ * The thread id is the one identifier every participant already holds and the
+ * one Note Taker keys on (see docs/2026-0825-0907 meeting-id inventory). It is
+ * present verbatim in recap URLs (`?threadId=`) and in the path of full
+ * `/meetup-join/` URLs; short `/meet/<code>` URLs do not carry it and need a
+ * Graph lookup instead, so this returns undefined for those.
+ */
+export function threadIdFromTeamsUrl(url: string): string | undefined {
+  const recap = url.match(/[?&]threadId=([^&#]+)/i);
+  if (recap) {
+    const id = decodeURIComponent(recap[1]);
+    return isMeetingThreadId(id) ? id : undefined;
+  }
+  const join = url.match(/\/meetup-join\/([^/?#]+)/i);
+  if (join) {
+    const id = decodeURIComponent(join[1]);
+    return isMeetingThreadId(id) ? id : undefined;
+  }
+  return undefined;
+}
+
+/** A Teams meeting chat thread id, as returned in onlineMeeting.chatInfo.threadId. */
+export function isMeetingThreadId(value: string): boolean {
+  return /^19:meeting_[A-Za-z0-9_-]+@thread\.v2$/.test(value);
+}

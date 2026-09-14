@@ -156,6 +156,7 @@ describe('Calendar View Tools', () => {
         'get-file',
         'attach-file',
         'put-file',
+        'get-meeting-transcript',
       ]);
 
       for (const call of mockServer.tool.mock.calls) {

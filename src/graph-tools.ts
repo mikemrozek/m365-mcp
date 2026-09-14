@@ -15,6 +15,7 @@ import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { registerNotificationTools } from './notification-tools.js';
 import { registerFileTextTools } from './file-text-tools.js';
 import { registerFileTools } from './file-tools.js';
+import { registerMeetingTools } from './meeting-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
@@ -1561,6 +1562,21 @@ export function registerGraphTools(
   });
 
   // ---- Unified file handling -------------------------------------------------
+  // get-meeting-transcript is served by TSQ's Note Taker, not Graph. It is
+  // registered whether or not Note Taker is configured, so the tool surface is
+  // stable; unconfigured, it reports itself as not yet enabled.
+  registerMeetingTools(server, graphClient, {
+    isToolEnabled,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+  });
+
   // get-file and attach-file supersede the per-delivery tools above. They are
   // registered as writes because both stage bytes into OneDrive or a draft.
   registerFileTools(server, graphClient, {

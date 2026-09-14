@@ -62,6 +62,7 @@ const CUSTOM_TOOLS = [
   'get-file',
   'attach-file',
   'put-file',
+  'get-meeting-transcript',
 ];
 
 const MOCKED_ENDPOINTS = [

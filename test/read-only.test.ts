@@ -65,6 +65,7 @@ vi.mock('../src/logger.js', () => {
  * added.
  */
 const CUSTOM_TOOLS_READ_ONLY = [
+  'get-meeting-transcript',
   'parse-teams-url',
   'list-conversation-messages',
   'list-drafts',
