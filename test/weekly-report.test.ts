@@ -221,3 +221,63 @@ describe('rendering', () => {
     expect(renderLogLine(report)).toMatch(/calls=\d+ \(prior \d+\) errors=\d+/);
   });
 });
+
+/**
+ * tsq.24: the usage record now carries a status and an error code, so the report
+ * can say what failed instead of only how often. Asked "what are the errors" on
+ * 2026-09-18, the answer had to be reconstructed by reproducing each shape by
+ * hand — these assertions are what makes that answer come out of the mail.
+ */
+describe('failure detail', () => {
+  const failing = (over: Partial<UsageRow>) =>
+    row(1, { tool: 'list-mail-messages', outcome: 'error', ...over });
+
+  it('groups failures by status and code, commonest first', () => {
+    const report = build([
+      failing({ status: 400, code: 'BadRequest' }),
+      failing({ status: 400, code: 'BadRequest' }),
+      failing({ status: 400, code: 'SearchWithFilter' }),
+      row(1, { tool: 'list-mail-messages' }),
+    ]);
+    const line = report.errorTools.find((t) => t.tool === 'list-mail-messages')!;
+    expect(line.errors).toBe(3);
+    expect(line.failures).toEqual([
+      { label: '400 BadRequest', count: 2 },
+      { label: '400 SearchWithFilter', count: 1 },
+    ]);
+  });
+
+  it('labels a refusal that carried no status by its code alone', () => {
+    const report = build([failing({ code: 'invalid_search' })]);
+    expect(report.errorTools[0].failures).toEqual([{ label: 'invalid_search', count: 1 }]);
+  });
+
+  // Every row logged before tsq.24 looks like this, and a week spanning the
+  // deploy will hold both kinds. Saying so beats implying we know.
+  it('calls a failure with neither field unattributed', () => {
+    const report = build([failing({}), failing({ status: 400, code: 'BadRequest' })]);
+    expect(report.errorTools[0].failures).toEqual([
+      { label: '400 BadRequest', count: 1 },
+      { label: 'unattributed', count: 1 },
+    ]);
+  });
+
+  it('leaves failures empty for a capability that did not fail', () => {
+    const report = build([row(1, { tool: 'send-mail' })]);
+    expect(report.topTools.find((t) => t.tool === 'send-mail')!.failures).toEqual([]);
+  });
+
+  it('prints the reasons in the errors table, and only there', () => {
+    const html = renderHtml(
+      build([
+        failing({ status: 400, code: 'BadRequest' }),
+        failing({ status: 400, code: 'BadRequest' }),
+      ])
+    );
+    expect(html).toContain('Why');
+    expect(html).toContain('400 BadRequest ×2');
+    // "Most used" keeps its four columns; the reason belongs with the errors.
+    const mostUsed = html.slice(html.indexOf('Most used'), html.indexOf('Where the errors were'));
+    expect(mostUsed).not.toContain('400 BadRequest');
+  });
+});

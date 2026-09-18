@@ -119,7 +119,8 @@ export async function fetchUsageRows(config: {
     | where Log_s has 'm365-usage'
     | extend d = parse_json(Log_s)
     | project ts = tostring(d.timestamp), tool = tostring(d.tool),
-              outcome = tostring(d.outcome), upn = tostring(d.upn)
+              outcome = tostring(d.outcome), upn = tostring(d.upn),
+              status = toint(d.status), code = tostring(d.code)
     | order by ts asc`;
 
   const response = await fetch(
@@ -140,13 +141,36 @@ export async function fetchUsageRows(config: {
   const table = body.tables?.[0];
   if (!table) return [];
   const index = (name: string) => table.columns.findIndex((c) => c.name === name);
-  const [ts, tool, outcome, upn] = ['ts', 'tool', 'outcome', 'upn'].map(index);
+  const [ts, tool, outcome, upn, status, code] = [
+    'ts',
+    'tool',
+    'outcome',
+    'upn',
+    'status',
+    'code',
+  ].map(index);
+
+  // status and code arrive null for anything logged before tsq.24, and for a
+  // failure that carried neither. Left undefined rather than coerced to 0/'',
+  // so the report can say `unattributed` instead of inventing a status.
+  const optionalNumber = (value: unknown): number | undefined => {
+    const n = Number(value);
+    return value === null || value === undefined || value === '' || !Number.isFinite(n)
+      ? undefined
+      : n;
+  };
+  const optionalString = (value: unknown): string | undefined => {
+    const s = value === null || value === undefined ? '' : String(value);
+    return s === '' ? undefined : s;
+  };
 
   return table.rows.map((row) => ({
     ts: String(row[ts] ?? ''),
     tool: String(row[tool] ?? ''),
     outcome: String(row[outcome] ?? ''),
     upn: String(row[upn] ?? ''),
+    status: status === -1 ? undefined : optionalNumber(row[status]),
+    code: code === -1 ? undefined : optionalString(row[code]),
   }));
 }
 

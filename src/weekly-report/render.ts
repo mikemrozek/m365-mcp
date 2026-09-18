@@ -86,6 +86,25 @@ function toolRows(tools: ToolLine[]): string[][] {
   ]);
 }
 
+/**
+ * The errors table carries one extra column: what the failures actually were.
+ *
+ * Before tsq.24 the record said only that a call failed, so answering "what are
+ * the errors" meant reproducing each one by hand. `unattributed` is shown rather
+ * than omitted — a week still holding pre-tsq.24 rows should say so.
+ */
+function errorRows(tools: ToolLine[]): string[][] {
+  return tools.map((t) => [
+    escapeHtml(t.tool),
+    String(t.calls),
+    delta(t.calls, t.priorCalls),
+    t.errors ? String(t.errors) : '—',
+    t.failures.length
+      ? t.failures.map((f) => `${escapeHtml(f.label)} ×${f.count}`).join(', ')
+      : '—',
+  ]);
+}
+
 /** 1 -> "1st", 4 -> "4th", 22 -> "22nd" — the way the subject line reads. */
 function ordinal(n: number): string {
   const suffixes = ['th', 'st', 'nd', 'rd'];
@@ -145,7 +164,9 @@ export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}
 
   if (report.errorTools.length) {
     parts.push(`<h3 style="${HEADING}">Where the errors were</h3>`);
-    parts.push(table(['Capability', 'Calls', 'Change', 'Errors'], toolRows(report.errorTools)));
+    parts.push(
+      table(['Capability', 'Calls', 'Change', 'Errors', 'Why'], errorRows(report.errorTools))
+    );
   }
 
   const fileTotal = report.fileSplit.replacement + report.fileSplit.superseded;

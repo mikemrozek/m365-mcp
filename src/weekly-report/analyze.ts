@@ -21,6 +21,16 @@ export interface UsageRow {
   /** 'success' or anything else; the log writes 'error' for failures. */
   outcome: string;
   upn: string;
+  /** HTTP status, on failures recorded from tsq.24 onward. Absent on older rows. */
+  status?: number;
+  /** Graph's error code or our refusal slug, from tsq.24 onward. Absent on older rows. */
+  code?: string;
+}
+
+/** One failure shape and how often it occurred — "400 BadRequest", seen 8 times. */
+export interface FailureKind {
+  label: string;
+  count: number;
 }
 
 export interface Totals {
@@ -42,6 +52,12 @@ export interface ToolLine {
   calls: number;
   priorCalls: number;
   errors: number;
+  /**
+   * What the failures were, commonest first. Empty when the tool did not fail;
+   * `unattributed` while rows logged before tsq.24 are still inside the window,
+   * which is deliberately visible rather than hidden — it shows the gap closing.
+   */
+  failures: FailureKind[];
 }
 
 export interface Report {
@@ -82,6 +98,29 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 function isError(row: UsageRow): boolean {
   return row.outcome !== 'success';
+}
+
+/**
+ * "400 BadRequest" where both halves were recorded, either half alone, and
+ * `unattributed` for a failure that carried neither — which is every failure
+ * logged before tsq.24 added the fields.
+ */
+function failureLabel(row: UsageRow): string {
+  const status = typeof row.status === 'number' && row.status > 0 ? String(row.status) : '';
+  const code = row.code?.trim() ?? '';
+  if (status && code) return `${status} ${code}`;
+  return status || code || 'unattributed';
+}
+
+function summarizeFailures(rows: UsageRow[]): FailureKind[] {
+  const counts = new Map<string, number>();
+  for (const row of rows.filter(isError)) {
+    const label = failureLabel(row);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
 
 function totals(rows: UsageRow[]): Totals {
@@ -275,6 +314,7 @@ export function buildReport(
       calls: calls.length,
       priorCalls: priorByTool.get(tool)?.length ?? 0,
       errors: calls.filter(isError).length,
+      failures: summarizeFailures(calls),
     };
   };
   const allTools = [...new Set([...currentByTool.keys(), ...priorByTool.keys()])].map(toolLine);
