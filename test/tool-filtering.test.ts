@@ -86,6 +86,31 @@ describe('Tool Filtering', () => {
     server = new McpServer({ name: 'test', version: '1.0.0' });
     graphClient = {} as GraphClient;
     toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => {});
+    // delegate-analysis is env-gated; make sure no ambient env leaks it into
+    // the unconditional expectations below.
+    delete process.env.INFERENCE_ENDPOINT;
+    delete process.env.INFERENCE_DEPLOYMENT;
+  });
+
+  // delegate-analysis (tsq.25) is deliberately NOT in CUSTOM_TOOLS: it is
+  // env-gated, and without INFERENCE_ENDPOINT/_DEPLOYMENT it must not exist at
+  // all — unlike get-meeting-transcript's registered-dark pattern.
+  it('registers delegate-analysis only when the inference env is set', () => {
+    registerGraphTools(server, graphClient, false);
+    expect(registered()).not.toContain('delegate-analysis');
+
+    process.env.INFERENCE_ENDPOINT = 'https://unit.test';
+    process.env.INFERENCE_DEPLOYMENT = 'test-model';
+    try {
+      const server2 = new McpServer({ name: 'test2', version: '1.0.0' });
+      const spy2 = vi.spyOn(server2, 'tool').mockImplementation(() => {});
+      registerGraphTools(server2, graphClient, false);
+      const names = spy2.mock.calls.map((c) => c[0] as string).sort();
+      expect(names).toEqual(sorted([...MOCKED_ENDPOINTS, ...CUSTOM_TOOLS, 'delegate-analysis']));
+    } finally {
+      delete process.env.INFERENCE_ENDPOINT;
+      delete process.env.INFERENCE_DEPLOYMENT;
+    }
   });
 
   it('should register all tools when no filter is provided', () => {

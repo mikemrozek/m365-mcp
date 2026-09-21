@@ -16,6 +16,7 @@ import { registerNotificationTools } from './notification-tools.js';
 import { registerFileTextTools } from './file-text-tools.js';
 import { registerFileTools } from './file-tools.js';
 import { registerMeetingTools } from './meeting-tools.js';
+import { registerInferenceTools } from './inference-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
@@ -1815,6 +1816,24 @@ export function registerGraphTools(
   // registered whether or not Note Taker is configured, so the tool surface is
   // stable; unconfigured, it reports itself as not yet enabled.
   registerMeetingTools(server, graphClient, {
+    isToolEnabled,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+  });
+
+  // ---- Delegated inference (Objective 10 pilot, tsq.25) ----------------------
+  // Registered only when INFERENCE_ENDPOINT/_DEPLOYMENT are set — absent, the
+  // tool does not exist. Deliberately NOT the registered-dark pattern
+  // get-meeting-transcript uses: a second model in the data path should be
+  // invisible until enabled, not discoverable-but-refusing. Pilot list and
+  // budget are enforced inside the handler, failing closed.
+  registerInferenceTools(server, graphClient, {
     isToolEnabled,
     push: (name: string) => {
       registeredNames.push(name);

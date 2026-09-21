@@ -42,6 +42,9 @@ const CUSTOM_TOOLS = [
   'get-file',
   'attach-file',
   'put-file',
+  // tsq.25: env-gated (registers only with INFERENCE_ENDPOINT set), but part of
+  // the advertised universe — the allowlist carries it so go-live is env-only.
+  'delegate-analysis',
 ];
 
 const universe = new Set<string>([...api.endpoints.map((e) => e.alias as string), ...CUSTOM_TOOLS]);

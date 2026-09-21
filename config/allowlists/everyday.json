@@ -21,6 +21,7 @@
     "create-reply-draft",
     "create-specific-calendar-event",
     "decline-calendar-event",
+    "delegate-analysis",
     "delete-calendar-event",
     "delete-excel-range",
     "delete-mail-attachment",
