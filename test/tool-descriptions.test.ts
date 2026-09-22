@@ -75,10 +75,14 @@ async function registerAllowlistedTools(): Promise<{ name: string; description: 
 describe('advertised tool descriptions', () => {
   it('registers the whole everyday allowlist', async () => {
     const tools = await registerAllowlistedTools();
-    // 124 shipped in tsq.18; tsq.19 removed add-mail-attachment and
-    // create-mail-attachment-upload-session (superseded by attach-file/put-file);
-    // tsq.20 added watch-for-reply, list-watches, cancel-watch (Correspondence Watch).
-    expect(tools.length).toBe(125);
+    // Derived rather than hardcoded — the literal 125 here went quietly stale
+    // when tsq.25 grew the allowlist, because its addition (delegate-analysis)
+    // is env-gated and so never registers in a bare test env. That is also the
+    // one legitimate difference between the allowlist and what registers.
+    const allowlisted = JSON.parse(readFileSync('config/allowlists/everyday.json', 'utf8'))
+      .tools as string[];
+    const envGated = ['delegate-analysis'];
+    expect(tools.length).toBe(allowlisted.length - envGated.length);
   });
 
   it('never opens with prose describing a different operation', async () => {

@@ -1125,7 +1125,7 @@
     "toolName": "get-chat-message-hosted-content",
     "workScopes": ["ChatMessage.Read"],
     "returnDownloadUrl": true,
-    "llmTip": "Returns raw bytes of a hosted content item (typically image/png or image/jpeg) attached to a Teams 1:1 or group chat message. Use list-chat-message-hosted-contents to discover IDs, or extract the ID from the <img src> URL in the message body."
+    "llmTip": "Returns raw bytes of a hosted content item (typically image/png or image/jpeg) attached to a Teams 1:1 or group chat message. Use list-chat-message-hosted-contents to discover IDs, or extract the ID from the <img src> URL in the message body. NOTE: bytes return inline as base64 (~1.37x file size) in this response — fine for small images, expensive for large screenshots. Prefer asking the user for the specific detail you need if the image is large."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages",
