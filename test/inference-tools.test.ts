@@ -47,6 +47,7 @@ const makeConfig = (over: Partial<InferenceConfig> = {}): InferenceConfig => ({
   pilotOids: [PILOT_OID],
   maxInputChars: 200_000,
   dailyTokenBudget: 2_000_000,
+  sendUserContext: false,
   ...over,
 });
 
@@ -297,8 +298,17 @@ describe('budget', () => {
 // ---- the provider call and its record ------------------------------------------------
 
 describe('provider call', () => {
-  it('asserts the human caller in user_security_context, snake_case', async () => {
+  // The DeepSeek /openai/v1 route rejects user_security_context outright
+  // (400 unrecognized_request_argument, proven live 2026-09-22) — sending it
+  // failed every call on the first pilot night. Off unless explicitly enabled.
+  it('does NOT send user_security_context by default', async () => {
     const { handler, chat } = setup();
+    await handler({ task: 'summarize', text: 'fine' });
+    expect('userContext' in (chat.mock.calls[0][0] as object)).toBe(false);
+  });
+
+  it('asserts the human caller, snake_case, when explicitly enabled', async () => {
+    const { handler, chat } = setup({ sendUserContext: true });
     await handler({ task: 'summarize', text: 'fine' });
     const sent = chat.mock.calls[0][0] as { userContext: Record<string, string> };
     expect(sent.userContext).toEqual({
@@ -387,6 +397,22 @@ describe('inferenceConfigFromEnv', () => {
     expect(config.pilotOids).toEqual([]);
     expect(config.maxInputChars).toBe(200_000);
     expect(config.dailyTokenBudget).toBe(2_000_000);
+    expect(config.sendUserContext).toBe(false);
+  });
+
+  it('enables user_security_context only on the explicit flag', () => {
+    const on = inferenceConfigFromEnv({
+      INFERENCE_ENDPOINT: 'https://x',
+      INFERENCE_DEPLOYMENT: 'm',
+      INFERENCE_SEND_USER_CONTEXT: 'true',
+    })!;
+    expect(on.sendUserContext).toBe(true);
+    const off = inferenceConfigFromEnv({
+      INFERENCE_ENDPOINT: 'https://x',
+      INFERENCE_DEPLOYMENT: 'm',
+      INFERENCE_SEND_USER_CONTEXT: 'yes',
+    })!;
+    expect(off.sendUserContext).toBe(false);
   });
 
   it('treats a malformed pilot list as EMPTY, never as everyone', () => {

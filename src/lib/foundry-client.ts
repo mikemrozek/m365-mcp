@@ -26,6 +26,18 @@ export interface InferenceConfig {
   pilotOids: string[];
   maxInputChars: number;
   dailyTokenBudget: number;
+  /**
+   * Send `user_security_context` on the request. Default FALSE, from live evidence
+   * (2026-09-22, first pilot night): the DeepSeek deployment on the /openai/v1 route
+   * rejects it — HTTP 400 "Unrecognized request argument supplied:
+   * user_security_context" — which failed every call. Isolated by A/B from inside
+   * the container the same night. Consequence, stated plainly: Purview cannot
+   * attribute these calls to the human until Microsoft supports the field here, so
+   * the server-side pre-send check is the ONLY policy layer. Flip
+   * INFERENCE_SEND_USER_CONTEXT=true only after re-testing against the live
+   * deployment.
+   */
+  sendUserContext: boolean;
 }
 
 const DEFAULT_MAX_INPUT_CHARS = 200_000;
@@ -70,6 +82,7 @@ export function inferenceConfigFromEnv(
     pilotOids,
     maxInputChars: positiveInt(env.INFERENCE_MAX_INPUT_CHARS, DEFAULT_MAX_INPUT_CHARS),
     dailyTokenBudget: positiveInt(env.INFERENCE_DAILY_TOKEN_BUDGET, DEFAULT_DAILY_TOKEN_BUDGET),
+    sendUserContext: (env.INFERENCE_SEND_USER_CONTEXT ?? '').trim().toLowerCase() === 'true',
   };
 }
 
