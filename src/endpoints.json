@@ -1104,20 +1104,22 @@
     "pathPattern": "/chats/{chat-id}/messages",
     "method": "get",
     "toolName": "list-chat-messages",
-    "workScopes": ["ChatMessage.Read"]
+    "workScopes": ["ChatMessage.Read"],
+    "llmTip": "Pasted images and screenshots appear in the body as <img src=\".../hostedContents/{id}/$value\">. To LOOK at one, call get-file with chatId, messageId and hostedContentId (the {id} segment) — it returns the image itself, viewable."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}",
     "method": "get",
     "toolName": "get-chat-message",
-    "workScopes": ["ChatMessage.Read"]
+    "workScopes": ["ChatMessage.Read"],
+    "llmTip": "Pasted images and screenshots appear in the body as <img src=\".../hostedContents/{id}/$value\">. To LOOK at one, call get-file with chatId, messageId and hostedContentId (the {id} segment) — it returns the image itself, viewable."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/hostedContents",
     "method": "get",
     "toolName": "list-chat-message-hosted-contents",
     "workScopes": ["ChatMessage.Read"],
-    "llmTip": "Lists hosted-content references (inline images, code snippets) attached to a Teams chat message. Returns an array of { id, contentType }. Use get-chat-message-hosted-content with the id to download the bytes. Hosted content IDs can also be parsed from the <img src> URL in the message body between /hostedContents/ and /$value."
+    "llmTip": "Lists hosted-content references (inline images, code snippets) attached to a Teams chat message. Returns an array of { id, contentType }. To view an image, call get-file with chatId, messageId and hostedContentId=id. The id can also be read straight from the <img src> URL in the message body (between /hostedContents/ and /$value), so this listing is usually unnecessary."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/hostedContents/{chatMessageHostedContent-id}/$value",
@@ -1125,7 +1127,7 @@
     "toolName": "get-chat-message-hosted-content",
     "workScopes": ["ChatMessage.Read"],
     "returnDownloadUrl": true,
-    "llmTip": "Returns raw bytes of a hosted content item (typically image/png or image/jpeg) attached to a Teams 1:1 or group chat message. Use list-chat-message-hosted-contents to discover IDs, or extract the ID from the <img src> URL in the message body. NOTE: bytes return inline as base64 (~1.37x file size) in this response — fine for small images, expensive for large screenshots. Prefer asking the user for the specific detail you need if the image is large."
+    "llmTip": "PREFER get-file with chatId, messageId and hostedContentId: it returns the image as an image you can SEE. This tool returns raw bytes as base64 TEXT (~1.37x file size) that you cannot view — use it only when you need the literal bytes."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages",
@@ -1181,20 +1183,22 @@
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages",
     "method": "get",
     "toolName": "list-channel-messages",
-    "workScopes": ["ChannelMessage.Read.All"]
+    "workScopes": ["ChannelMessage.Read.All"],
+    "llmTip": "Pasted images and screenshots appear in the body as <img src=\".../hostedContents/{id}/$value\">. To LOOK at one, call get-file with teamId, channelId, messageId and hostedContentId (the {id} segment) — it returns the image itself, viewable."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}",
     "method": "get",
     "toolName": "get-channel-message",
-    "workScopes": ["ChannelMessage.Read.All"]
+    "workScopes": ["ChannelMessage.Read.All"],
+    "llmTip": "Pasted images and screenshots appear in the body as <img src=\".../hostedContents/{id}/$value\">. To LOOK at one, call get-file with teamId, channelId, messageId and hostedContentId (the {id} segment) — it returns the image itself, viewable."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/hostedContents",
     "method": "get",
     "toolName": "list-channel-message-hosted-contents",
     "workScopes": ["ChannelMessage.Read.All"],
-    "llmTip": "Lists hosted-content references (inline images, code snippets) attached to a Teams channel message. Returns an array of { id, contentType }. Use get-channel-message-hosted-content with the id to download bytes."
+    "llmTip": "Lists hosted-content references (inline images, code snippets) attached to a Teams channel message. Returns an array of { id, contentType }. To view an image, call get-file with teamId, channelId, messageId and hostedContentId=id."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/hostedContents/{chatMessageHostedContent-id}/$value",
@@ -1202,7 +1206,7 @@
     "toolName": "get-channel-message-hosted-content",
     "workScopes": ["ChannelMessage.Read.All"],
     "returnDownloadUrl": true,
-    "llmTip": "Returns raw bytes of a hosted content item attached to a Teams channel message. Use list-channel-message-hosted-contents to discover IDs."
+    "llmTip": "PREFER get-file with teamId, channelId, messageId and hostedContentId: it returns the image as an image you can SEE. This tool returns raw bytes as base64 TEXT that you cannot view."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages",
@@ -1224,7 +1228,8 @@
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
     "method": "get",
     "toolName": "list-channel-message-replies",
-    "workScopes": ["ChannelMessage.Read.All"]
+    "workScopes": ["ChannelMessage.Read.All"],
+    "llmTip": "Pasted images and screenshots appear in the body as <img src=\".../hostedContents/{id}/$value\">. To LOOK at one, call get-file with teamId, channelId, messageId and hostedContentId (the {id} segment) — it returns the image itself, viewable."
   },
   {
     "pathPattern": "/teams/{team-id}/members",
@@ -1275,7 +1280,8 @@
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/replies",
     "method": "get",
     "toolName": "list-chat-message-replies",
-    "workScopes": ["ChatMessage.Read"]
+    "workScopes": ["ChatMessage.Read"],
+    "llmTip": "Pasted images and screenshots appear in the body as <img src=\".../hostedContents/{id}/$value\">. To LOOK at one, call get-file with chatId, messageId and hostedContentId (the {id} segment) — it returns the image itself, viewable."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/replies",

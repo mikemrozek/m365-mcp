@@ -311,6 +311,129 @@ describe('get-file routing', () => {
   });
 });
 
+describe('get-file viewing images (tsq.26)', () => {
+  let makeRequest: ReturnType<typeof vi.fn>;
+  let fetchBinary: ReturnType<typeof vi.fn>;
+  let putBinary: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    makeRequest = vi.fn();
+    fetchBinary = vi.fn();
+    putBinary = vi.fn();
+  });
+  const client = () => ({ makeRequest, fetchBinary, putBinary }) as unknown as Partial<GraphClient>;
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+  it('returns a Teams chat image as an image block the model can see', async () => {
+    fetchBinary.mockResolvedValueOnce({ buffer: png, contentType: 'image/png' });
+    const { handlers } = harness(client());
+    const res = (await handlers['get-file']({
+      chatId: '19:abc@thread.v2',
+      messageId: '1790',
+      hostedContentId: 'aWQ9eF9...',
+    })) as unknown as {
+      content: { type: string; data?: string; mimeType?: string; text?: string }[];
+    };
+
+    expect(fetchBinary).toHaveBeenCalledWith(
+      '/chats/19%3Aabc%40thread.v2/messages/1790/hostedContents/aWQ9eF9.../$value'
+    );
+    expect(makeRequest).not.toHaveBeenCalled();
+    expect(res.content[0]).toEqual({
+      type: 'image',
+      data: png.toString('base64'),
+      mimeType: 'image/png',
+    });
+    const meta = JSON.parse(res.content[1].text!);
+    expect(meta.delivery).toBe('image');
+    expect(meta.bytes).toBe(png.byteLength);
+  });
+
+  it('addresses a channel image through team and channel', async () => {
+    fetchBinary.mockResolvedValueOnce({ buffer: png, contentType: 'image/jpeg' });
+    const { handlers } = harness(client());
+    await handlers['get-file']({
+      teamId: 't1',
+      channelId: '19:ch@thread.tacv2',
+      messageId: 'm1',
+      hostedContentId: 'h1',
+    });
+    expect(fetchBinary).toHaveBeenCalledWith(
+      '/teams/t1/channels/19%3Ach%40thread.tacv2/messages/m1/hostedContents/h1/$value'
+    );
+  });
+
+  it('explains what a Teams image needs when the container is missing', async () => {
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'get-file', {
+      messageId: 'm1',
+      hostedContentId: 'h1',
+    });
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/chatId/);
+    expect(fetchBinary).not.toHaveBeenCalled();
+  });
+
+  it('stages a non-viewable hosted content for a link without downloading it twice', async () => {
+    fetchBinary.mockResolvedValueOnce({ buffer: Buffer.from('BM...'), contentType: 'image/bmp' });
+    makeRequest.mockResolvedValueOnce({ value: [] }); // staging prune listing
+    putBinary.mockResolvedValueOnce({
+      id: 's1',
+      '@microsoft.graph.downloadUrl': 'https://tenant.example/staged',
+    });
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'get-file', {
+      chatId: 'c1',
+      messageId: 'm1',
+      hostedContentId: 'h1',
+    });
+    expect(payload.delivery).toBe('url');
+    expect(payload.downloadUrl).toBe('https://tenant.example/staged');
+    expect(payload.note).toMatch(/not a viewable/);
+    expect(fetchBinary).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a OneDrive PNG as an image only when as:'image' is asked", async () => {
+    makeRequest.mockResolvedValueOnce({
+      name: 'shot.png',
+      size: png.byteLength,
+      file: { mimeType: 'image/png' },
+    });
+    fetchBinary.mockResolvedValueOnce({ buffer: png, contentType: 'image/png' });
+    const { handlers } = harness(client());
+    const res = (await handlers['get-file']({ itemId: 'i1', as: 'image' })) as unknown as {
+      content: { type: string }[];
+    };
+    expect(res.content[0].type).toBe('image');
+  });
+
+  it("refuses as:'image' for a non-image before moving any bytes", async () => {
+    makeRequest.mockResolvedValueOnce({
+      name: 'a.pdf',
+      size: 1000,
+      file: { mimeType: 'application/pdf' },
+    });
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'get-file', { itemId: 'i1', as: 'image' });
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/PNG/);
+    expect(fetchBinary).not.toHaveBeenCalled();
+  });
+
+  it("refuses as:'image' over the viewing limit before moving any bytes", async () => {
+    makeRequest.mockResolvedValueOnce({
+      name: 'big.jpg',
+      size: 6_000_000,
+      file: { mimeType: 'image/jpeg' },
+    });
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'get-file', { itemId: 'i1', as: 'image' });
+    expect(isError).toBe(true);
+    expect(payload.error).toMatch(/limit/);
+    expect(fetchBinary).not.toHaveBeenCalled();
+  });
+});
+
 describe('url response shape (consistency across branches)', () => {
   let makeRequest: ReturnType<typeof vi.fn>;
   let fetchBinary: ReturnType<typeof vi.fn>;

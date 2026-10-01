@@ -41,6 +41,7 @@ import {
  *   default            -> a short-lived pre-authenticated LINK
  *   tiny text files    -> inline, because a link would cost more than the content
  *   as: 'text'         -> extracted text, because the caller said so
+ *   as: 'image'        -> an image block the model can SEE (default for Teams images, tsq.26)
  *
  * Bytes still never traverse the conversation unasked. That is a cost control:
  * a 2.9 MB attachment as base64 would consume a large share of a user's token
@@ -90,6 +91,7 @@ const MIME_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   gif: 'image/gif',
+  webp: 'image/webp',
   zip: 'application/zip',
 };
 
@@ -107,6 +109,54 @@ const MAX_EXTRACT_BYTES = 40 * 1024 * 1024;
  * Deliberately small: this is the exception, not the rule.
  */
 const INLINE_MAX_BYTES = 32 * 1024;
+
+/**
+ * Ceiling for returning an image as an MCP image block (tsq.26). The model's
+ * image input caps at 5 MB per image, and that limit applies to the base64
+ * payload — so the raw ceiling is 5 MB × 3/4. An image block is billed as
+ * image tokens by its pixel count, not as ~1.37× base64 text, which is why
+ * this can be far larger than INLINE_MAX_BYTES: it is the difference between
+ * Claude LOOKING at a screenshot and reading a page of base64 about it.
+ */
+const IMAGE_BLOCK_MAX_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4);
+
+/** The formats the model accepts as an image block. Anything else gets a link. */
+const VIEWABLE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function viewableImageType(contentType: string): string | undefined {
+  const t = contentType.split(';')[0].trim().toLowerCase();
+  const normalized = t === 'image/jpg' ? 'image/jpeg' : t;
+  return VIEWABLE_IMAGE_TYPES.has(normalized) ? normalized : undefined;
+}
+
+/**
+ * An image the model can see: the image block first, then a short JSON note
+ * with the same metadata fields every other delivery carries.
+ */
+function imageResult(
+  buffer: Buffer,
+  mimeType: string,
+  meta: Record<string, unknown>
+): {
+  content: ({ type: 'image'; data: string; mimeType: string } | { type: 'text'; text: string })[];
+  isError?: boolean;
+} {
+  return {
+    content: [
+      { type: 'image' as const, data: buffer.toString('base64'), mimeType },
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          delivery: 'image',
+          ...meta,
+          bytes: buffer.byteLength,
+          contentType: mimeType,
+          note: 'The image is attached above as an image you can view directly.',
+        }),
+      },
+    ],
+  };
+}
 
 /** Simple PUT covers a single file to this size; beyond it Graph needs a session. */
 const MAX_SIMPLE_UPLOAD_BYTES = 250 * 1024 * 1024;
@@ -172,10 +222,47 @@ function resolveSource(params: {
   itemId?: string;
   driveId?: string;
   userId?: string;
+  chatId?: string;
+  teamId?: string;
+  channelId?: string;
+  hostedContentId?: string;
 }): SourceRef | { error: string } {
   const { messageId, attachmentId, itemId, driveId, userId } = params;
   const owner = userId?.trim();
   const mailBase = owner && owner !== 'me' ? `/users/${encodeURIComponent(owner)}` : '/me';
+
+  // Teams hosted content (tsq.26): images pasted into a chat or channel
+  // message. Graph exposes no name or size for these — only bytes and a
+  // content type — so the handler fetches the bytes first and decides then.
+  const hostedId = params.hostedContentId?.trim();
+  if (hostedId) {
+    const m = messageId?.trim();
+    const chat = params.chatId?.trim();
+    const team = params.teamId?.trim();
+    const channel = params.channelId?.trim();
+    let base: string | undefined;
+    if (m && chat) {
+      base = `/chats/${encodeURIComponent(chat)}/messages/${encodeURIComponent(m)}`;
+    } else if (m && team && channel) {
+      base =
+        `/teams/${encodeURIComponent(team)}/channels/${encodeURIComponent(channel)}` +
+        `/messages/${encodeURIComponent(m)}`;
+    }
+    if (!base) {
+      return {
+        error:
+          'A Teams image needs hostedContentId + messageId plus either chatId (chat) or ' +
+          'teamId + channelId (channel). The hostedContentId is the segment between ' +
+          '/hostedContents/ and /$value in the <img src> of the message body.',
+      };
+    }
+    const h = encodeURIComponent(hostedId);
+    return {
+      metaPath: `${base}/hostedContents/${h}`,
+      contentPath: `${base}/hostedContents/${h}/$value`,
+      label: 'teams hosted content',
+    };
+  }
 
   if (messageId?.trim() && attachmentId?.trim()) {
     const m = encodeURIComponent(messageId.trim());
@@ -201,9 +288,10 @@ function resolveSource(params: {
 
   return {
     error:
-      'Specify either messageId + attachmentId (for a mail attachment) or itemId (for a ' +
-      'OneDrive / SharePoint file). Get these from list-mail-attachments, ' +
-      'search-onedrive-files, or list-folder-files.',
+      'Specify either messageId + attachmentId (for a mail attachment), itemId (for a ' +
+      'OneDrive / SharePoint file), or chatId + messageId + hostedContentId (for an image ' +
+      'in a Teams chat). Get these from list-mail-attachments, search-onedrive-files, ' +
+      'list-folder-files, or the <img src> in a Teams message body.',
   };
 }
 
@@ -247,8 +335,12 @@ export function registerFileTools(
       // none of them, so callers kept landing on the superseded tool even though its
       // own text says to prefer this one. Usage 25 Aug-1 Sep: get-file 11 calls, the
       // five it replaced 21. Hence the vocabulary below, deliberately front-loaded.
-      'Download, read or open a file — an email attachment, or a document in OneDrive ' +
-        'or SharePoint. Handles PDF, Word, Excel, PowerPoint, images, CSV and text.\n\n' +
+      'Download, read, open or view a file — an email attachment, a document in OneDrive ' +
+        'or SharePoint, or an image or screenshot pasted into a Teams chat or channel ' +
+        'message. Handles PDF, Word, Excel, PowerPoint, images, CSV and text.\n\n' +
+        'Teams images: pass chatId (or teamId + channelId), messageId, and hostedContentId — ' +
+        "the segment between /hostedContents/ and /$value in the message body's <img src>. " +
+        'They come back as an image you can SEE, not as bytes to decode.\n\n' +
         'By default you get a short-lived pre-authenticated DOWNLOAD LINK, and you decide what ' +
         'to do with the file: fetch and parse it, search it, run code over it, or read it. The ' +
         'server does not interpret the file or assume what you wanted.\n\n' +
@@ -256,19 +348,37 @@ export function registerFileTools(
         '  • `url` — a download link, valid about an hour, no auth header needed. The normal case.\n' +
         '  • `inline` — the file was tiny (under 32KB) and is included directly, because a link ' +
         'would have cost more than the content.\n' +
-        '  • `text` — you asked for text with `as: "text"` and the document was readable.\n\n' +
+        '  • `text` — you asked for text with `as: "text"` and the document was readable.\n' +
+        '  • `image` — the image itself, viewable (Teams images by default; any PNG, JPEG, ' +
+        'GIF or WebP up to ~3.75 MB with `as: "image"`).\n\n' +
         "Pass `as: 'text'` ONLY when you actually want the document's prose — a summary, a " +
         'question answered from it. Do not use it when you need the file itself, exact ' +
         'structure, or data you intend to compute over: extraction flattens layout, drops ' +
         'anything without a text layer, and is capped, so a value in a long document can be cut ' +
         'off without you knowing.\n\n' +
-        'Identify the file by messageId + attachmentId, or by itemId (with driveId for a ' +
-        'SharePoint library).',
+        'Identify the file by messageId + attachmentId, by itemId (with driveId for a ' +
+        'SharePoint library), or by chatId / teamId + channelId with messageId + hostedContentId.',
       {
         messageId: z
           .string()
           .optional()
-          .describe('For a mail attachment: the message that owns it.'),
+          .describe('For a mail attachment or a Teams image: the message that owns it.'),
+        hostedContentId: z
+          .string()
+          .optional()
+          .describe(
+            'For a Teams image: the hosted content id, from the <img src> URL in the message ' +
+              'body (between /hostedContents/ and /$value).'
+          ),
+        chatId: z.string().optional().describe('For an image in a Teams chat: the chat id.'),
+        teamId: z
+          .string()
+          .optional()
+          .describe('For an image in a Teams channel: the team id (with channelId).'),
+        channelId: z
+          .string()
+          .optional()
+          .describe('For an image in a Teams channel: the channel id (with teamId).'),
         attachmentId: z
           .string()
           .optional()
@@ -291,12 +401,13 @@ export function registerFileTools(
             "For a shared/other mailbox: the user id or UPN. Omit (or 'me') for the signed-in user."
           ),
         as: z
-          .enum(['link', 'text'])
+          .enum(['link', 'text', 'image'])
           .optional()
           .describe(
             "How you want the file. 'link' (default) returns a download link and leaves the " +
               "file intact for you to handle. 'text' extracts the document's prose server-side " +
-              '— only ask for this when prose is genuinely what you want.'
+              "— only ask for this when prose is genuinely what you want. 'image' returns a " +
+              'PNG/JPEG/GIF/WebP as an image you can look at (the default for Teams images).'
           ),
         maxChars: z
           .number()
@@ -319,6 +430,47 @@ export function registerFileTools(
         withUsageLog('get-file', async () => {
           const source = resolveSource(params);
           if ('error' in source) return jsonResult({ error: source.error }, true);
+
+          // --- Teams images (tsq.26) -------------------------------------------
+          // The stopgap (tsq.25) exposed get-chat-message-hosted-content, which
+          // returns the image as base64 TEXT: the model can relay it but not see
+          // it. Here the bytes become an image block. Graph gives hosted content
+          // no name or size, so the bytes are fetched up front either way.
+          if (source.label === 'teams hosted content') {
+            const { buffer, contentType: fetched } = await graphClient.fetchBinary(
+              source.contentPath
+            );
+            const ext = (fetched.split(';')[0].split('/')[1] ?? 'bin').replace('jpeg', 'jpg');
+            const filename = `teams-image-${params.hostedContentId!.trim().slice(-12)}.${ext}`;
+            const viewable = viewableImageType(fetched);
+            if (params.as !== 'link' && viewable && buffer.byteLength <= IMAGE_BLOCK_MAX_BYTES) {
+              logger.info(`get-file: delivering Teams image as image (${buffer.byteLength}b)`);
+              return imageResult(buffer, viewable, { name: filename });
+            }
+            const url = await deliverUrl(
+              graphClient,
+              source,
+              filename,
+              fetched,
+              buffer.byteLength,
+              buffer
+            );
+            return jsonResult({
+              delivery: 'url',
+              name: filename,
+              contentType: fetched,
+              ...url,
+              ...(params.as !== 'link'
+                ? {
+                    note: viewable
+                      ? `Image is ${buffer.byteLength} bytes, over the ${IMAGE_BLOCK_MAX_BYTES}-byte ` +
+                        'limit for viewing directly, so here is a download link instead.'
+                      : `This hosted content is ${fetched || 'an unknown type'}, not a viewable ` +
+                        'image format, so here is a download link instead.',
+                  }
+                : {}),
+            });
+          }
 
           const meta = (await graphClient.makeRequest(source.metaPath)) as {
             '@odata.type'?: string;
@@ -364,6 +516,37 @@ export function registerFileTools(
           const filename = meta?.name ?? 'file';
           const contentType = meta?.contentType ?? meta?.file?.mimeType ?? '';
           const size = meta?.size ?? 0;
+
+          // --- VIEWING: an image the caller wants to look at (tsq.26) ----------
+          // Checked against metadata BEFORE any bytes move, so a refusal costs
+          // one metadata call, not a download.
+          if (params.as === 'image') {
+            const viewable =
+              viewableImageType(contentType) ?? viewableImageType(mimeFromName(filename));
+            if (!viewable) {
+              return jsonResult(
+                {
+                  error:
+                    `'${filename}' is ${contentType || 'not an image'}; as:'image' accepts PNG, ` +
+                    "JPEG, GIF and WebP. Call again without as:'image' for a download link.",
+                },
+                true
+              );
+            }
+            if (size > IMAGE_BLOCK_MAX_BYTES) {
+              return jsonResult(
+                {
+                  error:
+                    `'${filename}' is ${size} bytes, over the ${IMAGE_BLOCK_MAX_BYTES}-byte limit ` +
+                    "for viewing directly. Call again without as:'image' for a download link.",
+                },
+                true
+              );
+            }
+            const { buffer } = await graphClient.fetchBinary(source.contentPath);
+            logger.info(`get-file: delivering ${filename} as image (${buffer.byteLength}b)`);
+            return imageResult(buffer, viewable, { name: filename });
+          }
 
           // --- INTERPRETATION: only when the caller explicitly asked for it ----
           if (params.as === 'text') {
@@ -910,7 +1093,9 @@ async function deliverUrl(
   source: SourceRef,
   filename: string,
   contentType: string,
-  size: number
+  size: number,
+  /** Bytes the caller already holds, so staging does not download them twice. */
+  prefetched?: Buffer
 ): Promise<Record<string, unknown>> {
   if (source.label === 'drive item') {
     // Do NOT $select here. `@microsoft.graph.downloadUrl` is an OData annotation,
@@ -952,7 +1137,7 @@ async function deliverUrl(
   // than after, so a failure here cannot leave the caller without their file.
   await pruneStagingFolder(graphClient);
 
-  const { buffer } = await graphClient.fetchBinary(source.contentPath);
+  const buffer = prefetched ?? (await graphClient.fetchBinary(source.contentPath)).buffer;
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
   const uploadPath = `/me/drive/root:/${STAGING_FOLDER}/${encodeURIComponent(safeStagedName(filename))}:/content`;
   const staged = (await graphClient.putBinary(uploadPath, buffer, contentType)) as {
