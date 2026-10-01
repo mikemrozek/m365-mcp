@@ -8,7 +8,7 @@
  * thing nobody thought to look for.
  */
 
-import type { Report, ToolLine, UserLine } from './analyze.js';
+import type { InferenceSection, InferenceTotals, Report, ToolLine, UserLine } from './analyze.js';
 
 /**
  * Aptos 11pt throughout, tables included (Segoe UI as the fallback where Aptos
@@ -123,7 +123,10 @@ export function renderSubject(report: Report): string {
   return `M365 MCP connector Weekly Update for ${month} ${ordinal(d.getDate())}, ${d.getFullYear()}`;
 }
 
-export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}): string {
+export function renderHtml(
+  report: Report,
+  options: { secretExpiry?: Date; inference?: InferenceSection } = {}
+): string {
   const { current, prior } = report;
   const parts: string[] = [];
 
@@ -178,6 +181,48 @@ export function renderHtml(report: Report, options: { secretExpiry?: Date } = {}
         : 'No file activity this week.') +
       ` A retirement decision rides on this line, which is why it is reported every week rather than checked when someone remembers.</p>`
   );
+
+  // Delegated analysis (Objective 10 pilot). Absent entirely until the pilot
+  // has produced a record — every report before tsq.25 stays byte-identical.
+  if (options.inference) {
+    const inf = options.inference;
+    const cost = (t: InferenceTotals) =>
+      t.estCostUsd === undefined ? 'n/a (unpriced model)' : `$${t.estCostUsd.toFixed(4)}`;
+    const outcomes = (t: InferenceTotals) =>
+      t.outcomes.length
+        ? t.outcomes.map((o) => `${escapeHtml(o.label)} ×${o.count}`).join(', ')
+        : '—';
+    parts.push(`<h3 style="${HEADING}">Delegated analysis (pilot)</h3>`);
+    parts.push(
+      table(
+        ['', 'This week', 'Last week'],
+        [
+          ['Calls', String(inf.current.calls), String(inf.prior.calls)],
+          ['People', String(inf.current.users), String(inf.prior.users)],
+          [
+            'Tokens in / out',
+            `${inf.current.tokensIn.toLocaleString()} / ${inf.current.tokensOut.toLocaleString()}`,
+            `${inf.prior.tokensIn.toLocaleString()} / ${inf.prior.tokensOut.toLocaleString()}`,
+          ],
+          ['Estimated cost', cost(inf.current), cost(inf.prior)],
+          ['Outcomes', outcomes(inf.current), outcomes(inf.prior)],
+          [
+            'Median latency',
+            inf.current.medianLatencyMs
+              ? `${(inf.current.medianLatencyMs / 1000).toFixed(1)} s`
+              : '—',
+            inf.prior.medianLatencyMs ? `${(inf.prior.medianLatencyMs / 1000).toFixed(1)} s` : '—',
+          ],
+        ]
+      )
+    );
+    const cachedNote = inf.current.cachedTokens
+      ? ` Cached tokens appeared this week (${inf.current.cachedTokens.toLocaleString()}) — evidence prompt caching is active despite being undocumented for this model; note it in the findings doc.`
+      : '';
+    parts.push(
+      `<p style="color:#666;${FONT_STACK}">Costs are estimates at data-zone list prices (Aug 2026 meters); Azure Cost Management is the invoice. The go-wider decision reads off this table at the end of the measurement window.${cachedNote}</p>`
+    );
+  }
 
   if (report.neverUsed.length) {
     parts.push(`<h3 style="${HEADING}">Never used (${report.neverUsed.length})</h3>`);

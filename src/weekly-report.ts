@@ -28,9 +28,10 @@
 
 import logger from './logger.js';
 import { loadToolAllowlist } from './tool-allowlist.js';
-import { buildReport } from './weekly-report/analyze.js';
+import { buildInferenceSection, buildReport } from './weekly-report/analyze.js';
 import { renderHtml, renderLogLine, renderSubject } from './weekly-report/render.js';
 import {
+  fetchInferenceRows,
   fetchUsageRows,
   getGraphTokenViaFederation,
   sendReportMail,
@@ -67,6 +68,20 @@ export async function runWeeklyReport(argv: string[] = process.argv.slice(2)): P
     managedIdentityClientId,
   });
 
+  // The delegation pilot's records (tsq.26). A failure here must not cost the
+  // whole report — the section is simply absent, like the never-used list.
+  let inference;
+  try {
+    const inferenceRows = await fetchInferenceRows({
+      workspaceId: required('REPORT_WORKSPACE_ID'),
+      days: windowDays * 2,
+      managedIdentityClientId,
+    });
+    inference = buildInferenceSection(inferenceRows, { now: new Date(), windowDays });
+  } catch (error) {
+    logger.warn(`[WEEKLY REPORT] Skipping delegated-analysis section: ${(error as Error).message}`);
+  }
+
   const expiry = process.env.REPORT_SECRET_EXPIRY?.trim();
   const report = buildReport(rows, {
     now: new Date(),
@@ -74,7 +89,10 @@ export async function runWeeklyReport(argv: string[] = process.argv.slice(2)): P
     allowlist: optionalAllowlist(),
   });
 
-  const html = renderHtml(report, { secretExpiry: expiry ? new Date(expiry) : undefined });
+  const html = renderHtml(report, {
+    secretExpiry: expiry ? new Date(expiry) : undefined,
+    inference,
+  });
   const subject = renderSubject(report);
   logger.info(`[WEEKLY REPORT] ${renderLogLine(report)}`);
 

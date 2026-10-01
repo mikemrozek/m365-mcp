@@ -174,6 +174,88 @@ export async function fetchUsageRows(config: {
   }));
 }
 
+/**
+ * The delegated-analysis records (tsq.25's m365-inference lines). Same
+ * workspace, same identity, same mirror-the-hand-query discipline as
+ * fetchUsageRows. These records are content-free by construction; everything
+ * here is counts, tokens and outcomes.
+ */
+export async function fetchInferenceRows(config: {
+  workspaceId: string;
+  days: number;
+  managedIdentityClientId: string;
+}): Promise<import('./analyze.js').InferenceRow[]> {
+  const token = await getManagedIdentityToken(
+    LOG_ANALYTICS_RESOURCE,
+    config.managedIdentityClientId
+  );
+  const query = `
+    ContainerAppConsoleLogs_CL
+    | where TimeGenerated >= ago(${config.days}d)
+    | where Log_s has 'm365-inference'
+    | extend d = parse_json(Log_s)
+    | project ts = tostring(d.timestamp), oid = tostring(d.oid), upn = tostring(d.upn),
+              model = tostring(d.model), outcome = tostring(d.outcome),
+              inputTokens = toint(d.inputTokens), outputTokens = toint(d.outputTokens),
+              cachedTokens = toint(d.cachedTokens), latencyMs = toint(d.latencyMs),
+              code = tostring(d.code)
+    | order by ts asc`;
+
+  const response = await fetch(
+    `${LOG_ANALYTICS_RESOURCE}/v1/workspaces/${encodeURIComponent(config.workspaceId)}/query`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Log Analytics query failed: ${response.status} ${response.statusText}`);
+  }
+
+  const body = (await response.json()) as {
+    tables?: { columns: { name: string }[]; rows: unknown[][] }[];
+  };
+  const table = body.tables?.[0];
+  if (!table) return [];
+  const index = (name: string) => table.columns.findIndex((c) => c.name === name);
+  const col = Object.fromEntries(
+    [
+      'ts',
+      'oid',
+      'upn',
+      'model',
+      'outcome',
+      'inputTokens',
+      'outputTokens',
+      'cachedTokens',
+      'latencyMs',
+      'code',
+    ].map((name) => [name, index(name)])
+  );
+  const num = (v: unknown): number | undefined => {
+    const n = Number(v);
+    return v === null || v === undefined || v === '' || !Number.isFinite(n) ? undefined : n;
+  };
+  const str = (v: unknown): string | undefined => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return s === '' ? undefined : s;
+  };
+
+  return table.rows.map((row) => ({
+    ts: String(row[col.ts] ?? ''),
+    oid: str(row[col.oid]),
+    upn: str(row[col.upn]),
+    model: String(row[col.model] ?? ''),
+    outcome: String(row[col.outcome] ?? ''),
+    inputTokens: num(row[col.inputTokens]),
+    outputTokens: num(row[col.outputTokens]),
+    cachedTokens: num(row[col.cachedTokens]),
+    latencyMs: num(row[col.latencyMs]),
+    code: str(row[col.code]),
+  }));
+}
+
 export async function sendReportMail(config: {
   token: string;
   senderUpn: string;

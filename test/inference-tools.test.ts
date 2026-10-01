@@ -165,6 +165,19 @@ describe('denyListCheck', () => {
     });
   });
 
+  it('blocks the space-separated SSN form (tsq.26)', () => {
+    expect(denyListCheck('the ssn is 123 45 6789 per HR')).toEqual({
+      blocked: true,
+      rule: 'ssn',
+    });
+  });
+
+  // Declined deliberately: nine bare digits match routing numbers, invoice ids
+  // and phone fragments. A gate that cries wolf gets routed around.
+  it('does not block a bare nine-digit run', () => {
+    expect(denyListCheck('confirmation number 123456789 received')).toEqual({ blocked: false });
+  });
+
   it('blocks a Luhn-valid card number', () => {
     expect(denyListCheck('card 4111 1111 1111 1111 on file')).toEqual({
       blocked: true,
@@ -438,5 +451,92 @@ describe('inferenceConfigFromEnv', () => {
       INFERENCE_PILOT_OIDS: '["oid-a", " oid-b "]',
     })!;
     expect(config.pilotOids).toEqual(['oid-a', 'oid-b']);
+  });
+});
+
+/**
+ * tsq.26 oversize handling — born on the first pilot night, when one 567K-char
+ * automated report made the whole request unanalyzable and the error left the
+ * caller guessing which item was to blame. The invariant that survives every
+ * branch: nothing is ever trimmed silently.
+ */
+describe('oversize handling', () => {
+  const CAP = 500;
+  const bigBody = 'B'.repeat(2000);
+  const smallBody = 'useful small mail body';
+
+  function setupMail() {
+    const s = setup({ maxInputChars: CAP });
+    s.graphClient.makeRequest.mockImplementation(async (url: string) => ({
+      subject: url.includes('big') ? 'Barracuda Backup Report' : 'Small note',
+      receivedDateTime: '2026-09-23T12:00:00Z',
+      from: { emailAddress: { address: 'a@x.com', name: 'A' } },
+      body: { content: url.includes('big') ? bigBody : smallBody },
+    }));
+    return s;
+  }
+
+  it('fails by default, naming per-item sizes and suggesting skip', async () => {
+    const { handler, chat } = setupMail();
+    const result = await handler({ task: 'summarize', messageIds: ['big-1', 'small-1'] });
+    const payload = parse(result);
+    expect(payload.error).toBe('input_too_large');
+    expect(payload.items[0].ref).toContain('Barracuda');
+    expect(payload.items[0].chars).toBeGreaterThan(CAP);
+    expect(payload.message).toContain('onOversize');
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('skips only the oversized item, names it in the response, and analyzes the rest', async () => {
+    const { handler, chat } = setupMail();
+    const result = await handler({
+      task: 'summarize',
+      messageIds: ['big-1', 'small-1'],
+      onOversize: 'skip',
+    });
+
+    expect(result.isError).toBeUndefined();
+    const sent = chat.mock.calls[0][0] as { user: string };
+    expect(sent.user).toContain(smallBody);
+    expect(sent.user).not.toContain('BBBB');
+
+    expect(result.content[0].text).toContain('Skipped as oversized');
+    expect(result.content[0].text).toContain('Barracuda');
+    expect(result.content[0].text).toContain('does NOT cover these');
+
+    const record = inferenceRecords().at(-1)!;
+    expect(record).toMatchObject({ outcome: 'success', nMessages: 2, nSkipped: 1 });
+  });
+
+  it('still fails when everything was skipped', async () => {
+    const { handler, chat } = setupMail();
+    const result = await handler({ task: 'summarize', messageIds: ['big-1'], onOversize: 'skip' });
+    const payload = parse(result);
+    expect(payload.error).toBe('input_too_large');
+    expect(payload.skipped).toHaveLength(1);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('skip does not rescue a total that is over the cap with no single offender', async () => {
+    const { handler, chat } = setup({ maxInputChars: CAP });
+    // Three items of 300 chars each: none oversized alone, 900 total.
+    const s = 'x'.repeat(280);
+    const result = await handler({
+      task: 'summarize',
+      text: s,
+      messageIds: [],
+      onOversize: 'skip',
+    });
+    // inline alone fits — build a genuine multi-item case via messages instead
+    expect(result.isError).toBeUndefined();
+    const { handler: h2, chat: c2, graphClient } = setup({ maxInputChars: CAP });
+    graphClient.makeRequest.mockResolvedValue({
+      subject: 'S',
+      body: { content: 'y'.repeat(280) },
+    });
+    const r2 = await h2({ task: 'summarize', messageIds: ['m1', 'm2', 'm3'], onOversize: 'skip' });
+    expect(parse(r2).error).toBe('input_too_large');
+    expect(c2).not.toHaveBeenCalled();
+    void chat;
   });
 });

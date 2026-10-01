@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildReport, type UsageRow } from '../src/weekly-report/analyze.js';
+import {
+  buildInferenceSection,
+  buildReport,
+  type InferenceRow,
+  type UsageRow,
+} from '../src/weekly-report/analyze.js';
 import { renderHtml, renderLogLine, renderSubject } from '../src/weekly-report/render.js';
 
 const NOW = new Date('2026-09-08T12:00:00Z');
@@ -279,5 +284,104 @@ describe('failure detail', () => {
     // "Most used" keeps its four columns; the reason belongs with the errors.
     const mostUsed = html.slice(html.indexOf('Most used'), html.indexOf('Where the errors were'));
     expect(mostUsed).not.toContain('400 BadRequest');
+  });
+});
+
+/**
+ * tsq.26: the delegated-analysis pilot's records reach the report. The
+ * go-wider decision at the end of the measurement window is supposed to be
+ * read off this table, so the cost arithmetic is asserted exactly, and a
+ * report with no pilot activity must be byte-identical to one from before the
+ * pilot existed.
+ */
+describe('delegated analysis section', () => {
+  const irow = (daysAgo: number, over: Partial<InferenceRow> = {}): InferenceRow => ({
+    ts: new Date(NOW.getTime() - daysAgo * DAY).toISOString(),
+    model: 'deepseek-v4-flash',
+    outcome: 'success',
+    oid: 'pilot-1',
+    inputTokens: 1000,
+    outputTokens: 100,
+    latencyMs: 5000,
+    ...over,
+  });
+
+  const build = (rows: InferenceRow[]) => buildInferenceSection(rows, { now: NOW, windowDays: 7 });
+
+  it('does not exist when neither window has a record', () => {
+    expect(build([])).toBeUndefined();
+    expect(build([irow(20)])).toBeUndefined(); // older than both windows
+  });
+
+  it('splits the windows and totals tokens and users', () => {
+    const section = build([
+      irow(1),
+      irow(2, { oid: 'pilot-2', inputTokens: 500 }),
+      irow(9, { inputTokens: 9999 }),
+    ])!;
+    expect(section.current.calls).toBe(2);
+    expect(section.current.users).toBe(2);
+    expect(section.current.tokensIn).toBe(1500);
+    expect(section.prior.calls).toBe(1);
+    expect(section.prior.tokensIn).toBe(9999);
+  });
+
+  it('prices data-zone V4-Flash exactly: 1M in + 1M out = $0.77', () => {
+    const section = build([irow(1, { inputTokens: 1_000_000, outputTokens: 1_000_000 })])!;
+    expect(section.current.estCostUsd).toBeCloseTo(0.77, 6);
+  });
+
+  it('refuses to price an unknown model rather than costing it at zero', () => {
+    const section = build([irow(1), irow(1, { model: 'mystery-model' })])!;
+    expect(section.current.estCostUsd).toBeUndefined();
+  });
+
+  it('counts outcomes, commonest first', () => {
+    const section = build([
+      irow(1),
+      irow(1, { outcome: 'blocked_policy', code: 'ssn' }),
+      irow(1, { outcome: 'blocked_policy', code: 'ssn' }),
+    ])!;
+    expect(section.current.outcomes).toEqual([
+      { label: 'blocked_policy', count: 2 },
+      { label: 'success', count: 1 },
+    ]);
+  });
+
+  it('reports median latency over successes only', () => {
+    const section = build([
+      irow(1, { latencyMs: 2000 }),
+      irow(1, { latencyMs: 10_000 }),
+      irow(1, { latencyMs: 4000 }),
+      irow(1, { outcome: 'provider_error', latencyMs: 90_000 }),
+    ])!;
+    expect(section.current.medianLatencyMs).toBe(4000);
+  });
+
+  it('is absent from the rendered report unless passed in', () => {
+    const html = renderHtml(
+      build([]) === undefined
+        ? buildReport([row(1)], { now: NOW, windowDays: 7 })
+        : buildReport([row(1)], { now: NOW, windowDays: 7 })
+    );
+    expect(html).not.toContain('Delegated analysis');
+  });
+
+  it('renders the table with formatted cost and the estimate caveat', () => {
+    const html = renderHtml(buildReport([row(1)], { now: NOW, windowDays: 7 }), {
+      inference: build([irow(1, { inputTokens: 1_000_000, outputTokens: 1_000_000 })]),
+    });
+    expect(html).toContain('Delegated analysis (pilot)');
+    expect(html).toContain('$0.7700');
+    expect(html).toContain('Costs are estimates');
+    expect(html).not.toContain('Cached tokens appeared');
+  });
+
+  it('renders n/a for an unpriced model and calls out cached tokens when seen', () => {
+    const html = renderHtml(buildReport([row(1)], { now: NOW, windowDays: 7 }), {
+      inference: build([irow(1, { model: 'mystery-model', cachedTokens: 4096 })]),
+    });
+    expect(html).toContain('n/a (unpriced model)');
+    expect(html).toContain('Cached tokens appeared this week (4,096)');
   });
 });

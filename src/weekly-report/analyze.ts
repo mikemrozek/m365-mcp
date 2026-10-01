@@ -351,3 +351,110 @@ export function buildReport(
     headline: buildHeadline(users, allTools, totals(current), totals(prior)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Delegated analysis (Objective 10 pilot, tsq.26): the m365-inference records.
+//
+// The telemetry existed from tsq.25; nothing consumed it. The go-wider decision
+// at the end of the measurement window is supposed to be read off this report,
+// not hand-queried — the same reasoning that created the report itself.
+
+export interface InferenceRow {
+  ts: string;
+  oid?: string;
+  upn?: string;
+  model: string;
+  /** success | blocked_policy | over_budget | provider_error */
+  outcome: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
+  latencyMs?: number;
+  code?: string;
+}
+
+/**
+ * Data-zone US list prices per 1M tokens, from the Azure Retail Prices API
+ * (meters effective 2026-08-01; verified 2026-09-21 — see the tsq25 Part A
+ * findings doc). ESTIMATES for a decision, not billing: Cost Management is the
+ * invoice. An unpriced model renders as "n/a" rather than silently costing $0.
+ */
+const MODEL_USD_PER_1M: Record<string, { input: number; output: number }> = {
+  'deepseek-v4-flash': { input: 0.21, output: 0.56 },
+};
+
+export interface InferenceTotals {
+  calls: number;
+  users: number;
+  tokensIn: number;
+  tokensOut: number;
+  cachedTokens: number;
+  /** undefined when any call used a model with no price entry. */
+  estCostUsd?: number;
+  outcomes: FailureKind[];
+  medianLatencyMs?: number;
+}
+
+export interface InferenceSection {
+  current: InferenceTotals;
+  prior: InferenceTotals;
+}
+
+function inferenceTotals(rows: InferenceRow[]): InferenceTotals {
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  let cost: number | undefined = 0;
+  for (const row of rows) {
+    const price = MODEL_USD_PER_1M[row.model];
+    if (!price) {
+      cost = undefined;
+      break;
+    }
+    cost += (n(row.inputTokens) * price.input + n(row.outputTokens) * price.output) / 1_000_000;
+  }
+
+  const outcomeCounts = new Map<string, number>();
+  for (const row of rows) {
+    outcomeCounts.set(row.outcome, (outcomeCounts.get(row.outcome) ?? 0) + 1);
+  }
+
+  const latencies = rows
+    .filter((r) => r.outcome === 'success')
+    .map((r) => n(r.latencyMs))
+    .filter((v) => v > 0)
+    .sort((a, b) => a - b);
+
+  return {
+    calls: rows.length,
+    users: new Set(rows.map((r) => r.oid ?? r.upn ?? '?')).size,
+    tokensIn: rows.reduce((s, r) => s + n(r.inputTokens), 0),
+    tokensOut: rows.reduce((s, r) => s + n(r.outputTokens), 0),
+    cachedTokens: rows.reduce((s, r) => s + n(r.cachedTokens), 0),
+    ...(rows.length && cost !== undefined
+      ? { estCostUsd: cost }
+      : rows.length
+        ? {}
+        : { estCostUsd: 0 }),
+    outcomes: [...outcomeCounts.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
+    ...(latencies.length ? { medianLatencyMs: latencies[Math.floor(latencies.length / 2)] } : {}),
+  };
+}
+
+/** Undefined when neither window has a single record — the section then simply does not exist. */
+export function buildInferenceSection(
+  rows: InferenceRow[],
+  options: { now: Date; windowDays?: number }
+): InferenceSection | undefined {
+  const days = options.windowDays ?? 7;
+  const to = options.now.getTime();
+  const from = to - days * DAY_MS;
+  const priorFrom = from - days * DAY_MS;
+
+  const at = (r: InferenceRow) => new Date(r.ts).getTime();
+  const current = rows.filter((r) => at(r) >= from && at(r) < to);
+  const prior = rows.filter((r) => at(r) >= priorFrom && at(r) < from);
+  if (current.length === 0 && prior.length === 0) return undefined;
+
+  return { current: inferenceTotals(current), prior: inferenceTotals(prior) };
+}

@@ -77,7 +77,11 @@ export const denyListCheck: PreSendCheck = (content) => {
   if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(content)) {
     return { blocked: true, rule: 'private_key' };
   }
-  if (/\b\d{3}-\d{2}-\d{4}\b/.test(content)) {
+  // Dashed and spaced forms (tsq.26, from pilot testing). The bare nine-digit
+  // form is DECLINED deliberately: every routing number, invoice id and phone
+  // fragment would trip it, and a gate that cries wolf gets routed around —
+  // which is worse than the gap it closes.
+  if (/\b\d{3}[- ]\d{2}[- ]\d{4}\b/.test(content)) {
     return { blocked: true, rule: 'ssn' };
   }
   // Card numbers: digit runs of 13–16 with optional spaces/dashes, Luhn-checked
@@ -137,6 +141,7 @@ function logInference(record: {
   nMessages: number;
   nFiles: number;
   inlineChars: number;
+  nSkipped?: number;
 }): void {
   usageLogger.info('inference', { type: 'm365-inference', ...record });
 }
@@ -210,6 +215,12 @@ export function registerInferenceTools(
           .describe(
             `OneDrive driveItem ids in your own drive (max ${MAX_FILES}); the server extracts their text.`
           ),
+        onOversize: z
+          .enum(['fail', 'skip'])
+          .optional()
+          .describe(
+            "When one item alone exceeds the size limit: 'fail' (default) refuses the whole call and names the offenders; 'skip' drops oversized items, analyzes the rest, and lists what was skipped in the response. Nothing is ever trimmed silently."
+          ),
         model: z
           .enum([config.deployment] as [string])
           .optional()
@@ -226,6 +237,7 @@ export function registerInferenceTools(
         text?: string;
         messageIds?: string[];
         driveItemIds?: string[];
+        onOversize?: 'fail' | 'skip';
         model?: string;
       }) =>
         withUsageLog(name, async () => {
@@ -246,10 +258,15 @@ export function registerInferenceTools(
             return err({ error: 'task_required', message: 'Provide a non-empty task.' });
           }
 
-          // 2. Assemble content — the caller's own permissions, existing code paths.
-          const sections: string[] = [];
+          // 2. Assemble content — the caller's own permissions, existing code
+          //    paths. Items keep a ref so the size handling below can name
+          //    exactly which one is oversized instead of leaving the caller
+          //    to guess.
+          const items: { ref: string; text: string }[] = [];
           const inlineChars = params.text?.length ?? 0;
-          if (params.text?.trim()) sections.push(`--- inline text ---\n${params.text}`);
+          if (params.text?.trim()) {
+            items.push({ ref: 'inline text', text: `--- inline text ---\n${params.text}` });
+          }
 
           const messageIds = [...new Set(params.messageIds ?? [])];
           for (const id of messageIds) {
@@ -273,9 +290,10 @@ export function registerInferenceTools(
               });
             }
             const from = msg.from?.emailAddress;
-            sections.push(
-              `--- message ---\nFrom: ${from?.name ?? ''} <${from?.address ?? ''}>\nDate: ${msg.receivedDateTime ?? ''}\nSubject: ${msg.subject ?? ''}\n\n${msg.body?.content ?? ''}`
-            );
+            items.push({
+              ref: `message "${msg.subject ?? id}"`,
+              text: `--- message ---\nFrom: ${from?.name ?? ''} <${from?.address ?? ''}>\nDate: ${msg.receivedDateTime ?? ''}\nSubject: ${msg.subject ?? ''}\n\n${msg.body?.content ?? ''}`,
+            });
           }
 
           const driveItemIds = [...new Set(params.driveItemIds ?? [])];
@@ -320,7 +338,10 @@ export function registerInferenceTools(
                 meta?.file?.mimeType ?? '',
                 config.maxInputChars
               );
-              sections.push(`--- file: ${meta?.name ?? id} ---\n${extracted.text}`);
+              items.push({
+                ref: `file "${meta?.name ?? id}"`,
+                text: `--- file: ${meta?.name ?? id} ---\n${extracted.text}`,
+              });
             } catch (error) {
               if (error instanceof UnsupportedFormatError) {
                 return err({
@@ -337,26 +358,55 @@ export function registerInferenceTools(
             }
           }
 
-          const content = sections.join('\n\n');
-          if (!content.trim()) {
+          if (!items.some((i) => i.text.trim())) {
             return err({
               error: 'nothing_to_analyze',
               message: 'Provide text, messageIds or driveItemIds.',
             });
           }
 
-          // 3. Size cap. Refuse, never truncate silently: an analysis of half
-          //    the content presented as the whole is worse than an error.
+          // 3. Size handling. Never trim silently — an analysis of half the
+          //    content presented as the whole is worse than an error. tsq.26,
+          //    from the first pilot night (a 567K automated report blocked all
+          //    analysis): 'skip' drops only items that individually exceed the
+          //    limit and names them; the default still refuses, now listing
+          //    per-item sizes so the caller can narrow or skip deliberately.
+          const itemSizes = items
+            .map((i) => ({ ref: i.ref, chars: i.text.length }))
+            .sort((a, b) => b.chars - a.chars);
+          let skipped: { ref: string; chars: number }[] = [];
+          let kept = items;
+          if (params.onOversize === 'skip') {
+            skipped = itemSizes.filter((i) => i.chars > config.maxInputChars);
+            kept = items.filter((i) => i.text.length <= config.maxInputChars);
+            if (kept.length === 0) {
+              return err({
+                error: 'input_too_large',
+                limit: config.maxInputChars,
+                skipped,
+                message:
+                  'Every item exceeds the size limit; skipping them all leaves nothing to analyze.',
+              });
+            }
+          }
+
+          const content = kept.map((i) => i.text).join('\n\n');
           if (content.length > config.maxInputChars) {
             return err({
               error: 'input_too_large',
               chars: content.length,
               limit: config.maxInputChars,
-              message: `Content is ${content.length} characters against a limit of ${config.maxInputChars}. Narrow the scope — fewer messages or files, or shorter text. The server never truncates silently.`,
+              items: itemSizes.slice(0, 5),
+              message: `Content is ${content.length} characters against a limit of ${config.maxInputChars}. Narrow the scope, or pass onOversize: "skip" to drop individually-oversized items. The server never truncates silently.`,
             });
           }
 
-          const counts = { nMessages: messageIds.length, nFiles: driveItemIds.length, inlineChars };
+          const counts = {
+            nMessages: messageIds.length,
+            nFiles: driveItemIds.length,
+            inlineChars,
+            ...(skipped.length ? { nSkipped: skipped.length } : {}),
+          };
           const model = params.model ?? config.deployment;
 
           // 4. Policy, layer (a): the server's own pre-send check.
@@ -456,7 +506,14 @@ export function registerInferenceTools(
             content: [
               {
                 type: 'text',
-                text: `[Machine-generated by delegated model ${model} — review before relying on it.]\n\n${result.content}`,
+                text:
+                  `[Machine-generated by delegated model ${model} — review before relying on it.]` +
+                  (skipped.length
+                    ? `\n[Skipped as oversized, per onOversize "skip": ${skipped
+                        .map((s) => `${s.ref} (${s.chars.toLocaleString()} chars)`)
+                        .join('; ')} — the analysis below does NOT cover these.]`
+                    : '') +
+                  `\n\n${result.content}`,
               },
             ],
           };
