@@ -63,6 +63,12 @@ const CUSTOM_TOOLS = [
   'attach-file',
   'put-file',
   'get-meeting-transcript',
+  'list-my-meetings',
+  'get-meeting',
+  'open-sharing-link',
+  'track-reply',
+  'list-awaiting-replies',
+  'untrack-reply',
 ];
 
 const MOCKED_ENDPOINTS = [

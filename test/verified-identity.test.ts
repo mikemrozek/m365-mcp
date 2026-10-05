@@ -4,6 +4,18 @@ import {
   isIdentityVerificationError,
   verifyCallerIdentity,
 } from '../src/lib/verified-identity.js';
+import { getSecrets } from '../src/secrets.js';
+
+vi.mock('../src/secrets.js', () => ({ getSecrets: vi.fn() }));
+
+/** What getSecrets() returns: in production, Key Vault's ms365-mcp-tenant-id. */
+function configuredTenant(tenantId: string) {
+  vi.mocked(getSecrets).mockResolvedValue({
+    clientId: 'client',
+    tenantId,
+    cloudType: 'global',
+  });
+}
 
 /** Build a decodable (unsigned) JWT so the tenant/oid claim path is exercised. */
 function fakeToken(claims: Record<string, unknown>): string {
@@ -28,6 +40,7 @@ describe('verifyCallerIdentity', () => {
   beforeEach(() => {
     clearVerifiedIdentityCache();
     delete process.env.MS365_MCP_TENANT_ID;
+    configuredTenant('common');
   });
 
   afterEach(() => {
@@ -119,8 +132,8 @@ describe('verifyCallerIdentity', () => {
     );
   });
 
-  it('refuses a caller from an unexpected tenant when a tenant is configured', async () => {
-    process.env.MS365_MCP_TENANT_ID = TENANT;
+  it('refuses a caller from another tenant when the configured tenant (secrets) differs', async () => {
+    configuredTenant(TENANT);
     vi.spyOn(global, 'fetch').mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
 
     await expect(
@@ -130,8 +143,26 @@ describe('verifyCallerIdentity', () => {
     );
   });
 
+  it('enforces the tenant from secrets even when MS365_MCP_TENANT_ID is unset (production)', async () => {
+    // The pre-tsq.27 bug: production sets the tenant in Key Vault, never in
+    // the environment, so an env-only check silently passed everyone.
+    delete process.env.MS365_MCP_TENANT_ID;
+    configuredTenant(TENANT.toUpperCase());
+    vi.spyOn(global, 'fetch').mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
+
+    await expect(
+      verifyCallerIdentity(fakeToken({ tid: '11111111-2222-3333-4444-555555555555' }))
+    ).rejects.toSatisfy(
+      (e: unknown) => isIdentityVerificationError(e) && e.reason === 'tenant_mismatch'
+    );
+    clearVerifiedIdentityCache();
+    await expect(verifyCallerIdentity(fakeToken({ tid: TENANT }))).resolves.toMatchObject({
+      oid: OID,
+    });
+  });
+
   it('accepts the configured tenant', async () => {
-    process.env.MS365_MCP_TENANT_ID = TENANT;
+    configuredTenant(TENANT);
     vi.spyOn(global, 'fetch').mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
 
     await expect(verifyCallerIdentity(fakeToken({ tid: TENANT }))).resolves.toMatchObject({
@@ -139,13 +170,80 @@ describe('verifyCallerIdentity', () => {
     });
   });
 
-  it('does not enforce a tenant when configured as common', async () => {
-    process.env.MS365_MCP_TENANT_ID = 'common';
+  it('refuses a token with no tenant claim when a tenant is configured', async () => {
+    configuredTenant(TENANT);
+    vi.spyOn(global, 'fetch').mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
+
+    await expect(verifyCallerIdentity('opaque-token')).rejects.toSatisfy(
+      (e: unknown) => isIdentityVerificationError(e) && e.reason === 'tenant_mismatch'
+    );
+  });
+
+  it.each(['common', 'organizations', ''])(
+    'does not enforce a tenant when configured as %j',
+    async (tenant) => {
+      configuredTenant(tenant);
+      vi.spyOn(global, 'fetch').mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
+
+      await expect(
+        verifyCallerIdentity(fakeToken({ tid: 'anything-at-all' }))
+      ).resolves.toMatchObject({ oid: OID });
+    }
+  );
+
+  it('lets a caller pass the expected tenant explicitly, overriding secrets', async () => {
+    configuredTenant('common');
     vi.spyOn(global, 'fetch').mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
 
     await expect(
-      verifyCallerIdentity(fakeToken({ tid: 'anything-at-all' }))
-    ).resolves.toMatchObject({ oid: OID });
+      verifyCallerIdentity(fakeToken({ tid: 'other' }), { expectedTenantId: TENANT })
+    ).rejects.toSatisfy(
+      (e: unknown) => isIdentityVerificationError(e) && e.reason === 'tenant_mismatch'
+    );
+  });
+
+  it('fails closed, without calling Graph, when the tenant configuration cannot be read', async () => {
+    vi.mocked(getSecrets).mockRejectedValue(new Error('Key Vault unreachable'));
+    const spy = vi.spyOn(global, 'fetch');
+
+    await expect(verifyCallerIdentity(fakeToken({ tid: TENANT }))).rejects.toSatisfy(
+      (e: unknown) => isIdentityVerificationError(e) && e.reason === 'config_unavailable'
+    );
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('times out a Graph /me call that hangs, as graph_unavailable', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        })
+    );
+
+    await expect(
+      verifyCallerIdentity(fakeToken({ tid: TENANT }), { timeoutMs: 20 })
+    ).rejects.toSatisfy(
+      (e: unknown) => isIdentityVerificationError(e) && e.reason === 'graph_unavailable'
+    );
+  });
+
+  it('caches for five minutes, then asks Graph again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const spy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(graphOk({ id: OID, userPrincipalName: UPN }));
+      const token = fakeToken({ tid: TENANT, sub: 'ttl' });
+      await verifyCallerIdentity(token);
+      vi.setSystemTime(Date.now() + 4 * 60 * 1000);
+      await verifyCallerIdentity(token);
+      expect(spy).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(Date.now() + 2 * 60 * 1000);
+      await verifyCallerIdentity(token);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects a missing token without calling Graph', async () => {

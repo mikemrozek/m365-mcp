@@ -551,6 +551,40 @@ describe('graph-tools', () => {
       expect(url).toContain(`$search=${encodeURIComponent(query)}`);
     });
 
+    it('drops orderby when searching mail, which Graph rejects as SearchWithOrderBy', async () => {
+      const endpoint = makeEndpoint();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient([
+        { content: [{ type: 'text', text: JSON.stringify({ value: [] }) }] },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      await server.tools.get('test-tool')!.handler({
+        search: 'from:john',
+        orderby: 'receivedDateTime desc',
+      });
+      const url = graphClient.graphRequest.mock.calls[0][0] as string;
+      expect(url).toContain('$search=');
+      expect(url).not.toContain('orderby');
+    });
+
+    it('keeps orderby on a mail listing without $search', async () => {
+      const endpoint = makeEndpoint();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient([
+        { content: [{ type: 'text', text: JSON.stringify({ value: [] }) }] },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      await server.tools.get('test-tool')!.handler({ orderby: 'receivedDateTime desc' });
+      const url = graphClient.graphRequest.mock.calls[0][0] as string;
+      expect(url).toContain('orderby');
+    });
+
     it.each([
       '/me/mailFolders/:mailFolderId/messages',
       '/users/:userId/messages',

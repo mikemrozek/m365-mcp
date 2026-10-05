@@ -66,6 +66,10 @@ vi.mock('../src/logger.js', () => {
  */
 const CUSTOM_TOOLS_READ_ONLY = [
   'get-meeting-transcript',
+  'list-my-meetings',
+  'get-meeting',
+  'open-sharing-link',
+  'list-awaiting-replies',
   'parse-teams-url',
   'list-conversation-messages',
   'list-drafts',
@@ -89,6 +93,8 @@ const CUSTOM_TOOLS_ALL = [
   'get-file',
   'attach-file',
   'put-file',
+  'track-reply',
+  'untrack-reply',
 ];
 
 const sorted = (names: unknown[]) => [...(names as string[])].sort();

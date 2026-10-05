@@ -15,6 +15,7 @@ import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { registerNotificationTools } from './notification-tools.js';
 import { registerFileTextTools } from './file-text-tools.js';
 import { registerFileTools } from './file-tools.js';
+import { registerReplyTrackingTools } from './reply-tracking-tools.js';
 import { registerMeetingTools } from './meeting-tools.js';
 import { registerInferenceTools } from './inference-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
@@ -296,6 +297,16 @@ function normalizeSearchQueryParam(
   const raw = queryParams['$search'];
   if (raw === undefined) return;
   const trimmed = raw.trim();
+
+  // Graph rejects $search with $orderby on messages (SearchWithOrderBy, 400). It
+  // was 19 of 23 list-mail-messages failures in the week of 27 September: the
+  // model asks for "newest first" out of habit. Search results already come back
+  // newest-sent first (learn.microsoft.com/graph/search-query-parameter), which
+  // is what the sort nearly always asked for, so drop it rather than fail.
+  if (queryParams['$orderby'] !== undefined) {
+    logger.info(`Dropped '$orderby' from ${toolAlias}: Graph does not allow it with $search`);
+    delete queryParams['$orderby'];
+  }
 
   // Nothing searchable. Deleting $search would widen the request into an unfiltered listing
   // of the whole mailbox and hand it back as though it were the search result, which is a
@@ -1812,9 +1823,10 @@ export function registerGraphTools(
   });
 
   // ---- Unified file handling -------------------------------------------------
-  // get-meeting-transcript is served by TSQ's Note Taker, not Graph. It is
-  // registered whether or not Note Taker is configured, so the tool surface is
-  // stable; unconfigured, it reports itself as not yet enabled.
+  // The meeting tools (list-my-meetings, get-meeting, get-meeting-transcript)
+  // are served by TSQ's Note Taker, not Graph. They are registered whether or
+  // not Note Taker is configured, so the tool surface is stable; unconfigured,
+  // they report themselves as not yet enabled.
   registerMeetingTools(server, graphClient, {
     isToolEnabled,
     push: (name: string) => {
@@ -1830,7 +1842,7 @@ export function registerGraphTools(
   // ---- Delegated inference (Objective 10 pilot, tsq.25) ----------------------
   // Registered only when INFERENCE_ENDPOINT/_DEPLOYMENT are set — absent, the
   // tool does not exist. Deliberately NOT the registered-dark pattern
-  // get-meeting-transcript uses: a second model in the data path should be
+  // the meeting tools use: a second model in the data path should be
   // invisible until enabled, not discoverable-but-refusing. Pilot list and
   // budget are enforced inside the handler, failing closed.
   registerInferenceTools(server, graphClient, {
@@ -1848,6 +1860,28 @@ export function registerGraphTools(
   // get-file and attach-file supersede the per-delivery tools above. They are
   // registered as writes because both stage bytes into OneDrive or a draft.
   registerFileTools(server, graphClient, {
+    isToolEnabled,
+    readOnly,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+    skip: (name: string) => {
+      logger.info(`Skipping write tool ${name} - read-only mode`);
+      skippedCount++;
+    },
+  });
+
+  // ---- Reply tracking (tsq.27) ------------------------------------------------
+  // The state lives on the user's own sent message as an extended property, not
+  // on this server: it survives deploys and restarts, any conversation can read
+  // it, and TSQ holds nothing. Replaces the need for a live subscription that
+  // watch-for-reply has, which only works while its conversation stays open.
+  registerReplyTrackingTools(server, graphClient, {
     isToolEnabled,
     readOnly,
     push: (name: string) => {

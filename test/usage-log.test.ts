@@ -133,9 +133,21 @@ describe('describeFailure', () => {
     const detail = describeFailure({
       content: [{ type: 'text', text: JSON.stringify({ error: 'not a code "at all", really' }) }],
     });
-    expect(detail.code).toBeDefined();
-    expect(detail.code).not.toMatch(/[\s"]/);
-    expect(detail.code!.length).toBeLessThanOrEqual(64);
+    // tsq.27: prose is not a code, so nothing is written rather than a squeezed sentence.
+    expect(detail.code).toBeUndefined();
+  });
+
+  it('takes the nested Graph code out of a wrapped error message, and nothing else', async () => {
+    const { describeFailure } = await loadUsageLog();
+    const wrapped = `Microsoft Graph API error: 400 Bad Request - ${graphErrorText(
+      'SearchWithOrderBy',
+      'The query "budget from:alice" cannot be combined with orderby'
+    )}`;
+    const detail = describeFailure({
+      content: [{ type: 'text', text: JSON.stringify({ error: wrapped }) }],
+    });
+    expect(detail.code).toBe('SearchWithOrderBy');
+    expect(JSON.stringify(detail)).not.toContain('alice');
   });
 });
 
@@ -231,5 +243,24 @@ describe('withUsageLog', () => {
     expect(record.outcome).toBe('success');
     expect(record.status).toBeUndefined();
     expect(record.code).toBeUndefined();
+  });
+});
+
+describe('upstream request ids (tsq.27)', () => {
+  it('records Note Taker request ids as bare tokens, on success too', async () => {
+    const { withUsageLog } = await loadUsageLog();
+    await withUsageLog('get-meeting', async () => ({
+      content: [{ type: 'text' as const, text: '{}' }],
+      _meta: { noteTakerRequestIds: ['req-1', 'bad id "x"', 7, 'a', 'b', 'c', 'd'] },
+    }));
+    const record = infoSpy.mock.calls.at(-1)![1];
+    expect(record.outcome).toBe('success');
+    expect(record.upstream_request_ids).toEqual(['req-1', 'badidx', 'a', 'b', 'c']);
+  });
+
+  it('writes nothing when a tool carries none', async () => {
+    const { withUsageLog } = await loadUsageLog();
+    await withUsageLog('get-file', async () => ({ content: [] }));
+    expect(infoSpy.mock.calls.at(-1)![1].upstream_request_ids).toBeUndefined();
   });
 });

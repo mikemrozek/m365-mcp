@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import logger from '../logger.js';
 import { getCloudEndpoints, parseCloudType } from '../cloud-config.js';
 import { actorFromToken, tenantFromToken } from './microsoft-auth.js';
+import { getSecrets } from '../secrets.js';
 import type { RequestActor } from '../request-context.js';
 
 /**
@@ -51,7 +52,12 @@ export interface VerifiedIdentity {
 export class IdentityVerificationError extends Error {
   constructor(
     message: string,
-    readonly reason: 'graph_rejected' | 'graph_unavailable' | 'tenant_mismatch' | 'malformed'
+    readonly reason:
+      | 'graph_rejected'
+      | 'graph_unavailable'
+      | 'tenant_mismatch'
+      | 'config_unavailable'
+      | 'malformed'
   ) {
     super(message);
     this.name = 'IdentityVerificationError';
@@ -94,16 +100,52 @@ export function clearVerifiedIdentityCache(): void {
   cache.clear();
 }
 
+/** Tenant values that mean "any tenant" rather than naming one. */
+const UNRESTRICTED_TENANTS = new Set(['common', 'organizations', 'consumers']);
+
 /**
- * The tenant this server is willing to assert identities from. `common` (the
- * default) means "no restriction configured" and disables the check; set
- * MS365_MCP_TENANT_ID to a specific tenant to enforce it.
+ * The tenant this server is willing to assert identities from.
+ *
+ * Until tsq.27 this read process.env.MS365_MCP_TENANT_ID, which production never
+ * sets — the tenant there comes from Key Vault (`ms365-mcp-tenant-id`) — so the
+ * check was silently a no-op. It now reads the same configured tenant the
+ * OAuth flow uses: `getSecrets().tenantId`, which is Key Vault when
+ * MS365_MCP_KEYVAULT_URL is set and the environment variable otherwise.
+ * `common` (the default when nothing is configured) disables the check.
+ *
+ * If the configuration cannot be read at all, that is a refusal: we do not know
+ * which tenant we are allowed to vouch for.
  */
-function expectedTenantId(): string | undefined {
-  const configured = process.env.MS365_MCP_TENANT_ID?.trim();
-  if (!configured || configured.toLowerCase() === 'common') return undefined;
-  return configured.toLowerCase();
+async function expectedTenantId(override?: string | null): Promise<string | undefined> {
+  let configured: string | undefined;
+  if (override !== undefined) {
+    configured = override ?? undefined;
+  } else {
+    try {
+      configured = (await getSecrets()).tenantId;
+    } catch (error) {
+      throw new IdentityVerificationError(
+        `Could not read the configured tenant: ${(error as Error).message}`,
+        'config_unavailable'
+      );
+    }
+  }
+  const t = configured?.trim().toLowerCase();
+  if (!t || UNRESTRICTED_TENANTS.has(t)) return undefined;
+  return t;
 }
+
+export interface VerifyOptions {
+  /**
+   * Tenant to enforce instead of the configured one. `null` means "no
+   * restriction". Omit it to use `getSecrets().tenantId`.
+   */
+  expectedTenantId?: string | null;
+  /** Timeout on the Graph /me call. Default 10s. */
+  timeoutMs?: number;
+}
+
+const DEFAULT_GRAPH_TIMEOUT_MS = 10_000;
 
 /**
  * Resolve the caller's identity via Graph, or throw.
@@ -111,7 +153,10 @@ function expectedTenantId(): string | undefined {
  * Call this immediately before asserting an identity to a third party. Do not
  * use it to gate ordinary Graph tool calls — those are already gated by Graph.
  */
-export async function verifyCallerIdentity(accessToken: string): Promise<VerifiedIdentity> {
+export async function verifyCallerIdentity(
+  accessToken: string,
+  options: VerifyOptions = {}
+): Promise<VerifiedIdentity> {
   if (!accessToken || typeof accessToken !== 'string') {
     throw new IdentityVerificationError('No access token on the request', 'malformed');
   }
@@ -126,28 +171,47 @@ export async function verifyCallerIdentity(accessToken: string): Promise<Verifie
   const cloudType = parseCloudType(process.env.MS365_MCP_CLOUD_TYPE);
   const { graphApi } = getCloudEndpoints(cloudType);
 
+  // Resolve the tenant rule first: if it cannot be read, nothing else matters.
+  const expected = await expectedTenantId(options.expectedTenantId);
+
+  const timeoutMs = options.timeoutMs ?? DEFAULT_GRAPH_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
+  let body: { id?: unknown; userPrincipalName?: unknown };
   try {
-    response = await fetch(`${graphApi}/v1.0/me?$select=id,userPrincipalName`, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
-    });
-  } catch (error) {
-    // Network failure is not an authorization failure, but it is still a
-    // refusal to assert: we do not know who this is.
-    throw new IdentityVerificationError(
-      `Could not reach Graph to verify caller identity: ${(error as Error).message}`,
-      'graph_unavailable'
-    );
+    try {
+      response = await fetch(`${graphApi}/v1.0/me?$select=id,userPrincipalName`, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+        signal: controller.signal,
+      });
+    } catch (error) {
+      // Network failure or timeout is not an authorization failure, but it is
+      // still a refusal to assert: we do not know who this is.
+      throw new IdentityVerificationError(
+        controller.signal.aborted
+          ? `Graph did not answer within ${timeoutMs}ms while verifying caller identity`
+          : `Could not reach Graph to verify caller identity: ${(error as Error).message}`,
+        'graph_unavailable'
+      );
+    }
+
+    if (!response.ok) {
+      throw new IdentityVerificationError(
+        `Graph rejected the caller's token (HTTP ${response.status})`,
+        response.status >= 500 ? 'graph_unavailable' : 'graph_rejected'
+      );
+    }
+
+    try {
+      body = (await response.json()) as typeof body;
+    } catch {
+      throw new IdentityVerificationError('Graph returned an unreadable /me response', 'malformed');
+    }
+  } finally {
+    clearTimeout(timer);
   }
 
-  if (!response.ok) {
-    throw new IdentityVerificationError(
-      `Graph rejected the caller's token (HTTP ${response.status})`,
-      response.status >= 500 ? 'graph_unavailable' : 'graph_rejected'
-    );
-  }
-
-  const body = (await response.json()) as { id?: unknown; userPrincipalName?: unknown };
   const oid = typeof body.id === 'string' ? body.id.trim() : '';
   const upn = typeof body.userPrincipalName === 'string' ? body.userPrincipalName.trim() : '';
   if (!oid || !upn) {
@@ -164,7 +228,6 @@ export async function verifyCallerIdentity(accessToken: string): Promise<Verifie
   // oid/upn — that would misreport a decodable token as an unknown tenant.
   const tid = tenantFromToken(accessToken)?.toLowerCase();
 
-  const expected = expectedTenantId();
   if (expected) {
     if (!tid) {
       // Opaque or claim-less token: Graph accepted it, but we cannot tell which

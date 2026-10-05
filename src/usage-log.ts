@@ -100,7 +100,13 @@ function codeFrom(text: string): string | undefined {
     const parsed = JSON.parse(text.slice(start)) as { error?: string | { code?: string } };
     const raw = typeof parsed.error === 'string' ? parsed.error : parsed.error?.code;
     if (typeof raw !== 'string') return undefined;
-    return raw.replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 64) || undefined;
+    // A code is one token. Until tsq.27 a wrapped message — `{"error":"Microsoft
+    // Graph API error: 400 Bad Request - {...}"}` — was squeezed into one instead,
+    // and ~64 characters of Graph's text (which can echo the query) reached Log
+    // Analytics. Now: a token is kept; a sentence is searched for the nested
+    // Graph code and otherwise dropped.
+    if (/^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(raw)) return raw;
+    return raw.includes('{') ? codeFrom(raw) : undefined;
   } catch {
     // Not JSON, or a brace that only looked like the start of it.
     return undefined;
@@ -132,7 +138,12 @@ export function describeFailure(source: unknown): FailureDetail {
  * (HTTP/OAuth mode); in stdio/CLI mode there is a single local user, so actor
  * fields are simply absent.
  */
-export function logToolUsage(tool: string, outcome: ToolOutcome, failure?: FailureDetail): void {
+export function logToolUsage(
+  tool: string,
+  outcome: ToolOutcome,
+  failure?: FailureDetail,
+  upstreamRequestIds?: string[]
+): void {
   if (!enabled) return;
   const actor = getRequestActor();
   usageLogger.info('tool-usage', {
@@ -146,23 +157,38 @@ export function logToolUsage(tool: string, outcome: ToolOutcome, failure?: Failu
     oid: actor?.oid,
     upn: actor?.upn,
     tid: actor?.tid,
+    // Note Taker's request ids (tsq.27): Scott asked that every call to him be
+    // reconcilable from our side by oid, his request id and time. Ids only.
+    upstream_request_ids: upstreamRequestIds?.length ? upstreamRequestIds : undefined,
   });
+}
+
+/** Request ids a tool put in `_meta`, reduced to bare tokens so nothing else rides out. */
+function upstreamIdsFrom(meta: Record<string, unknown> | undefined): string[] | undefined {
+  const raw = meta?.noteTakerRequestIds;
+  if (!Array.isArray(raw)) return undefined;
+  const ids = raw
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 128))
+    .filter(Boolean)
+    .slice(0, 5);
+  return ids.length ? ids : undefined;
 }
 
 /**
  * Wrap a tool handler so its outcome is recorded on every exit path. Use for
  * custom tools that do not route through the shared Graph executor.
  */
-export async function withUsageLog<T extends { isError?: boolean }>(
-  tool: string,
-  fn: () => Promise<T>
-): Promise<T> {
+export async function withUsageLog<
+  T extends { isError?: boolean; _meta?: Record<string, unknown> },
+>(tool: string, fn: () => Promise<T>): Promise<T> {
   try {
     const result = await fn();
     logToolUsage(
       tool,
       result.isError ? 'error' : 'success',
-      result.isError ? describeFailure(result) : undefined
+      result.isError ? describeFailure(result) : undefined,
+      upstreamIdsFrom(result._meta)
     );
     return result;
   } catch (error) {

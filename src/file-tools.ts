@@ -1035,6 +1035,128 @@ export function registerFileTools(
         })
     );
   });
+
+  // --- open-sharing-link (tsq.27) --------------------------------------------
+  // Scott, 30 September: a colleague sent a folder link and Claude could only
+  // say "I can open files by id or find them by search". Every call in that
+  // session succeeded — the gap was that nothing accepted a link. Graph's
+  // /shares endpoint does: the link is base64url-encoded with a `u!` prefix.
+  //
+  // Prefer: redeemSharingLinkIfNecessary lets an organisation link the caller
+  // has never opened resolve for THIS request only, without permanently adding
+  // the caller to the item's permissions (`redeemSharingLink` would). Same
+  // effect as the user clicking it, minus the durable side effect.
+  register('open-sharing-link', false, () => {
+    server.tool(
+      'open-sharing-link',
+      'Open a OneDrive or SharePoint sharing link — a URL someone sent you to a file or ' +
+        'folder (https://…sharepoint.com/:f:/…, /:w:/, /:x:/, /:b:/, 1drv.ms, or a plain ' +
+        'SharePoint document URL). Returns what the link points to, and for a folder, its ' +
+        'contents.\n\n' +
+        'Use this whenever the user pastes or forwards a link, instead of searching for the ' +
+        'file by name. The result carries itemId + driveId: pass them to get-file to read or ' +
+        'download a file, or to list-folder-files to go deeper into a folder.\n\n' +
+        'It works only for links the signed-in user is allowed to open — the same as clicking ' +
+        'it in a browser. Opening it here does not add them to the file’s permissions.',
+      {
+        url: z.string().describe('The sharing link or document URL, exactly as received.'),
+        top: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe('For a folder: how many entries to list (default 50).'),
+      },
+      {
+        title: 'open-sharing-link',
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: true,
+      },
+      async (params) =>
+        withUsageLog('open-sharing-link', async () => {
+          const shareId = encodeSharingUrl(params.url);
+          if (!shareId) {
+            return jsonResult(
+              { error: 'That does not look like a link. Pass the full https:// URL.' },
+              true
+            );
+          }
+          const headers = { Prefer: 'redeemSharingLinkIfNecessary' };
+          const base = `/shares/${shareId}/driveItem`;
+          const item = (await graphClient.makeRequest(
+            `${base}?$select=id,name,size,webUrl,file,folder,parentReference,lastModifiedDateTime`,
+            { headers }
+          )) as SharedDriveItem;
+
+          const summary = summariseItem(item);
+          if (!item.folder) {
+            return jsonResult({
+              ...summary,
+              next: 'Pass itemId and driveId to get-file to read or download it.',
+            });
+          }
+
+          const top = params.top ?? 50;
+          const children = (await graphClient.makeRequest(
+            `${base}/children?$top=${top}&$select=id,name,size,webUrl,file,folder,parentReference,lastModifiedDateTime`,
+            { headers }
+          )) as { value?: SharedDriveItem[]; '@odata.nextLink'?: string };
+          const entries = (children.value ?? []).map(summariseItem);
+          return jsonResult({
+            ...summary,
+            entries,
+            ...(children['@odata.nextLink']
+              ? {
+                  truncated:
+                    `Showing the first ${entries.length} entries. Use list-folder-files ` +
+                    'with this itemId and driveId to page through the rest.',
+                }
+              : {}),
+            next:
+              'Pass an entry’s itemId and driveId to get-file to read it, or to ' +
+              'list-folder-files to open a subfolder.',
+          });
+        })
+    );
+  });
+}
+
+interface SharedDriveItem {
+  id?: string;
+  name?: string;
+  size?: number;
+  webUrl?: string;
+  lastModifiedDateTime?: string;
+  file?: { mimeType?: string };
+  folder?: { childCount?: number };
+  parentReference?: { driveId?: string };
+}
+
+function summariseItem(item: SharedDriveItem) {
+  return {
+    type: item.folder ? 'folder' : 'file',
+    name: item.name,
+    itemId: item.id,
+    driveId: item.parentReference?.driveId,
+    ...(item.folder ? { childCount: item.folder.childCount } : { size: item.size }),
+    ...(item.file?.mimeType ? { mimeType: item.file.mimeType } : {}),
+    lastModified: item.lastModifiedDateTime,
+    webUrl: item.webUrl,
+  };
+}
+
+/**
+ * Graph's sharing-link id: `u!` + unpadded base64url of the URL
+ * (learn.microsoft.com/graph/api/shares-get). Returns undefined for anything
+ * that is not an http(s) URL, so a stray filename never reaches /shares.
+ */
+export function encodeSharingUrl(raw: string): string | undefined {
+  const url = raw.trim().replace(/^<|>$/g, '');
+  if (!/^https?:\/\/\S+$/i.test(url)) return undefined;
+  const b64 = Buffer.from(url, 'utf8').toString('base64');
+  return 'u!' + b64.replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
 }
 
 /**

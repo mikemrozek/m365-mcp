@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { zipSync, strToU8 } from 'fflate';
-import { registerFileTools } from '../src/file-tools.js';
+import { registerFileTools, encodeSharingUrl } from '../src/file-tools.js';
 import type GraphClient from '../src/graph-client.js';
 
 vi.mock('../src/logger.js', () => ({
@@ -716,7 +716,8 @@ describe('read-only mode', () => {
     });
 
     expect(skipped.sort()).toEqual(['attach-file', 'get-file', 'put-file']);
-    expect(Object.keys(handlers)).toHaveLength(0);
+    // open-sharing-link only reads, so it survives read-only mode.
+    expect(Object.keys(handlers)).toEqual(['open-sharing-link']);
   });
 });
 
@@ -827,5 +828,85 @@ describe('put-file — the write side', () => {
     });
     expect(isError).toBe(true);
     expect(payload.error).toContain('beyond');
+  });
+});
+
+describe('open-sharing-link', () => {
+  let makeRequest: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    makeRequest = vi.fn();
+  });
+  const client = () => ({ makeRequest }) as unknown as Partial<GraphClient>;
+
+  it("encodes a link the way Graph's /shares expects", () => {
+    // Worked example from learn.microsoft.com/graph/api/shares-get.
+    expect(
+      encodeSharingUrl(
+        'https://onedrive.live.com/redir?resid=1231244193912!12&authKey=1201919!12921!1'
+      )
+    ).toBe(
+      'u!aHR0cHM6Ly9vbmVkcml2ZS5saXZlLmNvbS9yZWRpcj9yZXNpZD0xMjMxMjQ0MTkzOTEyITEyJmF1dGhLZXk9MTIwMTkxOSExMjkyMSEx'
+    );
+    expect(encodeSharingUrl('  <https://x.sharepoint.com/:f:/s/a?b=c>  ')).toMatch(
+      /^u![A-Za-z0-9_-]+$/
+    );
+    expect(encodeSharingUrl('report.docx')).toBeUndefined();
+  });
+
+  it('is registered as read-only', () => {
+    const { registered } = harness(client());
+    expect(registered).toContain('open-sharing-link');
+  });
+
+  it('resolves a file link and points at get-file, without a durable redeem', async () => {
+    makeRequest.mockResolvedValueOnce({
+      id: 'i1',
+      name: 'Plan.docx',
+      size: 1234,
+      file: { mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+      parentReference: { driveId: 'd1' },
+    });
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'open-sharing-link', {
+      url: 'https://tsq.sharepoint.com/:w:/s/x/abc',
+    });
+    expect(payload).toMatchObject({ type: 'file', itemId: 'i1', driveId: 'd1', size: 1234 });
+    expect(payload.next).toContain('get-file');
+    const [endpoint, opts] = makeRequest.mock.calls[0];
+    expect(endpoint).toMatch(/^\/shares\/u![A-Za-z0-9_-]+\/driveItem\?/);
+    expect(opts.headers.Prefer).toBe('redeemSharingLinkIfNecessary');
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('lists a folder and says when there is more', async () => {
+    makeRequest
+      .mockResolvedValueOnce({
+        id: 'f1',
+        name: 'Q3',
+        folder: { childCount: 120 },
+        parentReference: { driveId: 'd1' },
+      })
+      .mockResolvedValueOnce({
+        value: [{ id: 'c1', name: 'a.pdf', size: 5, file: {}, parentReference: { driveId: 'd1' } }],
+        '@odata.nextLink': 'https://graph/next',
+      });
+    const { handlers } = harness(client());
+    const { payload } = await call(handlers, 'open-sharing-link', {
+      url: 'https://tsq.sharepoint.com/:f:/s/x/abc',
+      top: 1,
+    });
+    expect(payload.type).toBe('folder');
+    expect(payload.entries).toEqual([
+      expect.objectContaining({ itemId: 'c1', driveId: 'd1', type: 'file' }),
+    ]);
+    expect(payload.truncated).toContain('list-folder-files');
+    expect(makeRequest.mock.calls[1][0]).toContain('/children?$top=1');
+  });
+
+  it('refuses something that is not a URL without calling Graph', async () => {
+    const { handlers } = harness(client());
+    const { isError } = await call(handlers, 'open-sharing-link', { url: 'Plan.docx' });
+    expect(isError).toBe(true);
+    expect(makeRequest).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { registerMeetingTools, resolveThreadId, DEFAULT_MAX_CHARS } from '../src/meeting-tools.js';
-import { NoteTakerError, type NoteTakerClient } from '../src/lib/notetaker-client.js';
+import {
+  DEFAULT_MAX_CHARS,
+  MEETING_TOOL_NAMES,
+  REFUSALS,
+  explainRefusal,
+  registerMeetingTools,
+  resolveThreadId,
+  toUtcIso,
+} from '../src/meeting-tools.js';
+import {
+  NOTETAKER_API_CODES,
+  NoteTakerError,
+  type NoteTakerClient,
+} from '../src/lib/notetaker-client.js';
 import { getRequestTokens } from '../src/request-context.js';
 import { IdentityVerificationError, verifyCallerIdentity } from '../src/lib/verified-identity.js';
 import type GraphClient from '../src/graph-client.js';
@@ -24,18 +36,42 @@ const JOIN_URL = `https://teams.microsoft.com/l/meetup-join/${encodeURIComponent
 const RECAP_URL = `https://teams.microsoft.com/v2/#/meetingrecap?threadId=${encodeURIComponent(THREAD)}&tenantId=t&organizerId=o`;
 const SHORT_URL = 'https://teams.microsoft.com/meet/29752586464443?p=abc';
 
-type Handler = (
-  p: Record<string, unknown>
-) => Promise<{ content: { text: string }[]; isError?: boolean }>;
+const ROW = (id: string, start = '2026-10-01T14:00:00Z') => ({
+  id,
+  subject: 'IT Controls',
+  start,
+  conversation_id: THREAD,
+  has_summary: true,
+});
+const DETAIL = {
+  ...ROW('m-1'),
+  summary: { text: 'We agreed X', decisions: ['X'], action_items: ['Mike: do Y'] },
+  participants: [{ name: 'Mike' }],
+};
 
-function harness(noteTaker: NoteTakerClient | null, makeRequest = vi.fn()) {
-  let handler: Handler | undefined;
+type ToolResult = {
+  content: { text: string }[];
+  isError?: boolean;
+  _meta?: { noteTakerRequestIds?: string[] };
+};
+type Handler = (p: Record<string, unknown>) => Promise<ToolResult>;
+
+function harness(
+  noteTaker: Partial<Record<keyof NoteTakerClient, unknown>> | null,
+  opts: { makeRequest?: ReturnType<typeof vi.fn>; transcriptsEnabled?: boolean } = {}
+) {
+  const handlers: Record<string, Handler> = {};
+  const schemas: Record<string, Record<string, unknown>> = {};
+  const descriptions: Record<string, string> = {};
   const server = {
-    tool: (_n: string, _d: string, _s: unknown, _a: unknown, h: Handler) => {
-      handler = h;
+    tool: (n: string, d: string, s: Record<string, unknown>, _a: unknown, h: Handler) => {
+      handlers[n] = h;
+      schemas[n] = s;
+      descriptions[n] = d;
     },
   } as unknown as Parameters<typeof registerMeetingTools>[0];
   const registered: string[] = [];
+  const makeRequest = opts.makeRequest ?? vi.fn();
   registerMeetingTools(
     server,
     { makeRequest } as unknown as GraphClient,
@@ -46,45 +82,399 @@ function harness(noteTaker: NoteTakerClient | null, makeRequest = vi.fn()) {
         throw new Error(`registration failed for ${n}: ${e.message}`);
       },
     },
-    { noteTaker }
+    {
+      noteTaker: noteTaker as NoteTakerClient | null,
+      transcriptsEnabled: opts.transcriptsEnabled ?? false,
+    }
   );
-  const call = async (params: Record<string, unknown>) => {
-    const r = await handler!(params);
-    return { payload: JSON.parse(r.content[0].text), isError: r.isError };
+  const call = async (tool: string, params: Record<string, unknown>) => {
+    const r = await handlers[tool](params);
+    return { payload: JSON.parse(r.content[0].text), isError: r.isError, meta: r._meta };
   };
-  return { registered, call, makeRequest };
+  return { registered, call, makeRequest, schemas, descriptions };
 }
 
-function stubNoteTaker(impl: (threadId: string, caller: typeof CALLER) => Promise<unknown>) {
-  return { getTranscript: vi.fn(impl) } as unknown as NoteTakerClient;
+function stubNoteTaker(overrides: Partial<Record<keyof NoteTakerClient, unknown>> = {}) {
+  return {
+    listMeetings: vi.fn(async () => ({ meetings: [ROW('m-1')], paging: {}, requestId: 'r-list' })),
+    lookupMeetings: vi.fn(async () => ({ meetings: [ROW('m-1')], paging: {}, requestId: 'r-lk' })),
+    getMeeting: vi.fn(async () => ({ meeting: DETAIL, requestId: 'r-det' })),
+    getTranscript: vi.fn(async () => ({ text: 'hello', meta: {}, requestId: 'r-tx' })),
+    ...overrides,
+  };
 }
-
-const transcriptOf = (content: string) => ({
-  threadId: THREAD,
-  subject: 'IT Controls discussion',
-  organizer: { upn: 'tony.chan@townsquaremedia.com' },
-  joinUrl: JOIN_URL,
-  transcript: { available: true as const, format: 'text' as const, content },
-});
 
 beforeEach(() => {
   vi.mocked(getRequestTokens).mockReturnValue({ accessToken: 'graph-token' });
-  vi.mocked(verifyCallerIdentity).mockResolvedValue(CALLER);
+  vi.mocked(verifyCallerIdentity).mockReset().mockResolvedValue(CALLER);
 });
 
 describe('registration', () => {
-  it('registers get-meeting-transcript and reports it', () => {
-    const { registered } = harness(null);
-    expect(registered).toEqual(['get-meeting-transcript']);
+  it('registers the three meeting tools', () => {
+    expect(harness(null).registered).toEqual([...MEETING_TOOL_NAMES]);
   });
 
-  it('is dark until Note Taker is configured: says so, touches nothing', async () => {
-    const { call, makeRequest } = harness(null);
-    const { payload, isError } = await call({ threadId: THREAD });
+  it('respects the allowlist per tool', () => {
+    const server = { tool: vi.fn() } as unknown as Parameters<typeof registerMeetingTools>[0];
+    const registered: string[] = [];
+    registerMeetingTools(
+      server,
+      {} as GraphClient,
+      {
+        isToolEnabled: (n) => n === 'get-meeting',
+        push: (n) => registered.push(n),
+        fail: () => {},
+      },
+      { noteTaker: null }
+    );
+    expect(registered).toEqual(['get-meeting']);
+  });
+
+  it.each(MEETING_TOOL_NAMES.map((n) => [n]))(
+    '%s takes no user or object id: identity comes from the session only',
+    (name) => {
+      const { schemas } = harness(null);
+      const keys = Object.keys(schemas[name]);
+      expect(keys.filter((k) => /oid|user|upn|caller|identity|principal|email$/i.test(k))).toEqual(
+        name === 'list-my-meetings' ? ['organizerEmail'] : []
+      );
+    }
+  );
+
+  it('front-loads the words people type', () => {
+    const { descriptions } = harness(null);
+    expect(descriptions['list-my-meetings']).toMatch(/^List my meetings/);
+    expect(descriptions['get-meeting']).toMatch(
+      /^Get meeting notes: the summary, decisions, action items/
+    );
+    expect(descriptions['get-meeting']).toMatch(/recap/);
+    expect(descriptions['get-meeting-transcript']).toMatch(/^Get the transcript of a meeting/);
+  });
+
+  it.each(['list-my-meetings', 'get-meeting'])(
+    '%s is dark until Note Taker is configured: says so, touches nothing',
+    async (tool) => {
+      const { call, makeRequest } = harness(null);
+      const { payload, isError } = await call(tool, { meetingId: 'm-1' });
+      expect(isError).toBe(true);
+      expect(payload.error).toBe('not_configured');
+      expect(makeRequest).not.toHaveBeenCalled();
+      expect(verifyCallerIdentity).not.toHaveBeenCalled();
+    }
+  );
+});
+
+describe('list-my-meetings', () => {
+  it('sends the verified identity and UTC-normalised filters to Note Taker', async () => {
+    const nt = stubNoteTaker();
+    const { payload, isError, meta } = await harness(nt).call('list-my-meetings', {
+      startAfter: '2026-10-01',
+      startBefore: '2026-10-02T09:00:00-04:00',
+      subjectContains: ' IT ',
+      organizerEmail: 'tony.chan@townsquaremedia.com',
+      limit: 10,
+    });
+    expect(isError).toBeUndefined();
+    expect(verifyCallerIdentity).toHaveBeenCalledWith('graph-token');
+    expect(nt.listMeetings).toHaveBeenCalledWith(CALLER, {
+      start_after: '2026-10-01T00:00:00Z',
+      start_before: '2026-10-02T13:00:00Z',
+      subject_contains: 'IT',
+      organizer_email: 'tony.chan@townsquaremedia.com',
+      limit: 10,
+      offset: undefined,
+    });
+    expect(payload).toMatchObject({ count: 1, meetings: [ROW('m-1')], requestId: 'r-list' });
+    expect(meta).toEqual({ noteTakerRequestIds: ['r-list'] });
+  });
+
+  it('suggests the next offset when the page is full', async () => {
+    const nt = stubNoteTaker({
+      listMeetings: vi.fn(async () => ({ meetings: [ROW('a'), ROW('b')], paging: {} })),
+    });
+    const { payload } = await harness(nt).call('list-my-meetings', { limit: 2, offset: 4 });
+    expect(payload.note).toMatch(/offset 6/);
+  });
+
+  it('rejects a malformed date without calling Note Taker', async () => {
+    const nt = stubNoteTaker();
+    const { payload, isError } = await harness(nt).call('list-my-meetings', {
+      startAfter: 'last tuesday',
+    });
     expect(isError).toBe(true);
-    expect(payload.error).toBe('not_configured');
+    expect(payload.error).toBe('invalid_input');
+    expect(nt.listMeetings).not.toHaveBeenCalled();
+  });
+
+  it('refuses to call Note Taker when identity cannot be verified', async () => {
+    vi.mocked(verifyCallerIdentity).mockRejectedValue(
+      new IdentityVerificationError('nope', 'graph_rejected')
+    );
+    const nt = stubNoteTaker();
+    const { payload, isError } = await harness(nt).call('list-my-meetings', {});
+    expect(isError).toBe(true);
+    expect(payload).toMatchObject({ error: 'identity_unverified', reason: 'graph_rejected' });
+    expect(nt.listMeetings).not.toHaveBeenCalled();
+  });
+
+  it('calls a tenant mismatch a connector configuration problem', async () => {
+    vi.mocked(verifyCallerIdentity).mockRejectedValue(
+      new IdentityVerificationError('x', 'tenant_mismatch')
+    );
+    const { payload } = await harness(stubNoteTaker()).call('list-my-meetings', {});
+    expect(payload).toMatchObject({ fault: 'connector_configuration', reportTo: 'Mike Mrozek' });
+  });
+
+  it('reports a missing caller credential', async () => {
+    vi.mocked(getRequestTokens).mockReturnValue(undefined);
+    const { payload, isError } = await harness(stubNoteTaker()).call('list-my-meetings', {});
+    expect(isError).toBe(true);
+    expect(payload.error).toBe('no_caller');
+  });
+});
+
+describe('get-meeting', () => {
+  it('by Note Taker id goes straight to the detail', async () => {
+    const nt = stubNoteTaker();
+    const { call, makeRequest } = harness(nt);
+    const { payload, meta } = await call('get-meeting', { meetingId: ' m-1 ' });
+    expect(nt.getMeeting).toHaveBeenCalledWith(CALLER, 'm-1');
+    expect(nt.lookupMeetings).not.toHaveBeenCalled();
     expect(makeRequest).not.toHaveBeenCalled();
+    expect(payload).toEqual({ meeting: DETAIL, requestId: 'r-det' });
+    expect(meta).toEqual({ noteTakerRequestIds: ['r-det'] });
+  });
+
+  it('from a calendar event: resolves the conversation, windows ±1 day, fetches the one match', async () => {
+    const makeRequest = vi.fn().mockResolvedValue({
+      subject: 'IT Controls',
+      start: { dateTime: '2026-10-01T14:00:00.0000000', timeZone: 'UTC' },
+      onlineMeeting: { joinUrl: JOIN_URL },
+    });
+    const nt = stubNoteTaker();
+    const { payload, meta } = await harness(nt, { makeRequest }).call('get-meeting', {
+      eventId: 'AAMk=',
+    });
+    expect(nt.lookupMeetings).toHaveBeenCalledWith(CALLER, {
+      conversation_id: THREAD,
+      start_after: '2026-09-30T14:00:00Z',
+      start_before: '2026-10-02T14:00:00Z',
+    });
+    expect(nt.getMeeting).toHaveBeenCalledWith(CALLER, 'm-1');
+    expect(payload).toMatchObject({
+      meeting: DETAIL,
+      resolvedVia: 'event',
+      conversationId: THREAD,
+      requestIds: ['r-lk', 'r-det'],
+    });
+    expect(meta).toEqual({ noteTakerRequestIds: ['r-lk', 'r-det'] });
+  });
+
+  it('explicit window overrides the event-derived one', async () => {
+    const makeRequest = vi.fn().mockResolvedValue({
+      start: { dateTime: '2026-10-01T14:00:00.0000000', timeZone: 'UTC' },
+      onlineMeeting: { joinUrl: JOIN_URL },
+    });
+    const nt = stubNoteTaker();
+    await harness(nt, { makeRequest }).call('get-meeting', {
+      eventId: 'e',
+      startAfter: '2026-10-01T13:00:00Z',
+    });
+    expect(nt.lookupMeetings).toHaveBeenCalledWith(CALLER, {
+      conversation_id: THREAD,
+      start_after: '2026-10-01T13:00:00Z',
+      start_before: '2026-10-02T14:00:00Z',
+    });
+  });
+
+  it('several occurrences: returns them to choose from, no detail call', async () => {
+    const nt = stubNoteTaker({
+      lookupMeetings: vi.fn(async () => ({
+        meetings: [ROW('m-1'), ROW('m-2', '2026-10-08T14:00:00Z')],
+        paging: {},
+        requestId: 'r-lk',
+      })),
+    });
+    const { payload, isError } = await harness(nt).call('get-meeting', { meetingUrl: RECAP_URL });
+    expect(isError).toBeUndefined();
+    expect(nt.lookupMeetings).toHaveBeenCalledWith(CALLER, { conversation_id: THREAD });
+    expect(nt.getMeeting).not.toHaveBeenCalled();
+    expect(payload).toMatchObject({ found: 2, resolvedVia: 'url' });
+    expect(payload.meetings.map((m: { id: string }) => m.id)).toEqual(['m-1', 'm-2']);
+    expect(payload.message).toMatch(/meetingId/);
+    expect(payload.message).toMatch(/startAfter\/startBefore/);
+  });
+
+  it('no occurrences: says so and mentions channel meetings and /meet/ links', async () => {
+    const nt = stubNoteTaker({
+      lookupMeetings: vi.fn(async () => ({ meetings: [], paging: {}, requestId: 'r' })),
+    });
+    const { payload, isError } = await harness(nt).call('get-meeting', { threadId: THREAD });
+    expect(isError).toBeUndefined();
+    expect(payload.found).toBe(0);
+    expect(payload.message).toMatch(/Channel meetings/);
+    expect(payload.message).toMatch(/\/meet\//);
+    expect(nt.getMeeting).not.toHaveBeenCalled();
+  });
+
+  it('an unresolvable reference is an error without a Note Taker call', async () => {
+    const nt = stubNoteTaker();
+    const { payload, isError } = await harness(nt).call('get-meeting', { threadId: 'garbage' });
+    expect(isError).toBe(true);
+    expect(payload.error).toBe('unresolved_meeting');
+    expect(nt.lookupMeetings).not.toHaveBeenCalled();
+  });
+
+  it('asks for an identifier when given none', async () => {
+    const { payload, isError } = await harness(stubNoteTaker()).call('get-meeting', {});
+    expect(isError).toBe(true);
+    expect(payload.message).toMatch(/meetingId, eventId, meetingUrl or threadId/);
+  });
+
+  it('relays meeting_not_found in plain language with the request id', async () => {
+    const nt = stubNoteTaker({
+      getMeeting: vi.fn(async () => {
+        throw new NoteTakerError('x', 'meeting_not_found', 404, undefined, 'req-7');
+      }),
+    });
+    const { payload, isError, meta } = await harness(nt).call('get-meeting', { meetingId: 'm' });
+    expect(isError).toBe(true);
+    expect(payload).toMatchObject({
+      error: 'meeting_not_found',
+      status: 404,
+      fault: 'not_found',
+      requestId: 'req-7',
+    });
+    expect(payload.message).toMatch(/you were not in it/);
+    expect(meta).toEqual({ noteTakerRequestIds: ['req-7'] });
+  });
+});
+
+describe('get-meeting-transcript', () => {
+  it('reports not_enabled when the transcripts flag is off, touching nothing', async () => {
+    const nt = stubNoteTaker();
+    const { payload, isError } = await harness(nt).call('get-meeting-transcript', {
+      meetingId: 'm-1',
+    });
+    expect(isError).toBe(true);
+    expect(payload.error).toBe('not_enabled');
+    expect(nt.getTranscript).not.toHaveBeenCalled();
     expect(verifyCallerIdentity).not.toHaveBeenCalled();
+  });
+
+  it('when enabled: fetches by Note Taker id with the page token', async () => {
+    const nt = stubNoteTaker({
+      getTranscript: vi.fn(async () => ({
+        text: 'hello',
+        meta: { next_page: '3' },
+        requestId: 't',
+      })),
+    });
+    const { payload } = await harness(nt, { transcriptsEnabled: true }).call(
+      'get-meeting-transcript',
+      { meetingId: 'm-1', page: '2' }
+    );
+    expect(nt.getTranscript).toHaveBeenCalledWith(CALLER, 'm-1', '2');
+    expect(payload).toMatchObject({
+      meetingId: 'm-1',
+      text: 'hello',
+      next_page: '3',
+      totalChars: 5,
+      truncated: false,
+      requestId: 't',
+    });
+  });
+
+  it('caps long pages at maxChars and says so', async () => {
+    const nt = stubNoteTaker({
+      getTranscript: vi.fn(async () => ({ text: 'x'.repeat(1200), meta: {} })),
+    });
+    const { payload } = await harness(nt, { transcriptsEnabled: true }).call(
+      'get-meeting-transcript',
+      { meetingId: 'm-1', maxChars: 500 }
+    );
+    expect(payload.text).toHaveLength(500);
+    expect(payload).toMatchObject({ totalChars: 1200, truncated: true });
+    expect(payload.note).toMatch(/cut at 500 of 1200/);
+  });
+
+  it('defaults the cap to DEFAULT_MAX_CHARS', async () => {
+    const nt = stubNoteTaker({
+      getTranscript: vi.fn(async () => ({ text: 'y'.repeat(DEFAULT_MAX_CHARS + 1), meta: {} })),
+    });
+    const { payload } = await harness(nt, { transcriptsEnabled: true }).call(
+      'get-meeting-transcript',
+      { meetingId: 'm-1' }
+    );
+    expect(payload.text).toHaveLength(DEFAULT_MAX_CHARS);
+    expect(payload.truncated).toBe(true);
+  });
+
+  it('takes only a Note Taker id, not a thread id or URL', () => {
+    const { schemas } = harness(null);
+    expect(Object.keys(schemas['get-meeting-transcript']).sort()).toEqual([
+      'maxChars',
+      'meetingId',
+      'page',
+    ]);
+  });
+});
+
+describe('explainRefusal', () => {
+  it('has a distinct message for every Note Taker code', () => {
+    const messages = NOTETAKER_API_CODES.map((c) => REFUSALS[c].message);
+    expect(new Set(messages).size).toBe(NOTETAKER_API_CODES.length);
+  });
+
+  it.each([
+    'invalid_token',
+    'token_expired',
+    'caller_not_allowed',
+    'app_token_required',
+    'missing_role',
+    'user_identity_missing',
+    'user_identity_invalid',
+  ] as const)('%s is a connector configuration problem to report to Mike', (code) => {
+    const out = explainRefusal(new NoteTakerError('server text', code, 403, undefined, 'rid'));
+    expect(out).toMatchObject({
+      error: code,
+      fault: 'connector_configuration',
+      reportTo: 'Mike Mrozek',
+      requestId: 'rid',
+    });
+    expect(out.message).toMatch(/not something you did/);
+  });
+
+  it.each([
+    ['user_not_enabled', 'access'],
+    ['meeting_not_found', 'not_found'],
+    ['tenant_transcript_access_disabled', 'switched_off'],
+    ['api_disabled', 'switched_off'],
+    ['transcripts_disabled', 'switched_off'],
+    ['upstream_unavailable', 'temporary'],
+    ['timeout', 'temporary'],
+  ] as const)('%s → %s, not blamed on configuration', (code, fault) => {
+    const out = explainRefusal(new NoteTakerError('x', code));
+    expect(out.fault).toBe(fault);
+    expect(out.reportTo).toBeUndefined();
+  });
+
+  it.each([
+    'rate_limited_user',
+    'rate_limited_connector',
+    'daily_limit_user',
+    'daily_limit_connector',
+  ] as const)('%s carries the retry delay into the message', (code) => {
+    const out = explainRefusal(new NoteTakerError('x', code, 429, 45));
+    expect(out).toMatchObject({ error: code, fault: 'rate_limit', retryAfterSeconds: 45 });
+    expect(out.message).toMatch(/about 45 seconds/);
+  });
+
+  it("never relays Note Taker's own message text", () => {
+    const out = explainRefusal(
+      new NoteTakerError('Board meeting re: layoffs', 'meeting_not_found')
+    );
+    expect(JSON.stringify(out)).not.toMatch(/layoffs/);
   });
 });
 
@@ -126,14 +516,16 @@ describe('resolveThreadId', () => {
     );
   });
 
-  it('follows a calendar event to its Teams link', async () => {
-    const makeRequest = vi
-      .fn()
-      .mockResolvedValue({ subject: 'Sync', onlineMeeting: { joinUrl: JOIN_URL } });
+  it('follows a calendar event to its Teams link and carries its start in UTC', async () => {
+    const makeRequest = vi.fn().mockResolvedValue({
+      subject: 'Sync',
+      start: { dateTime: '2026-10-01T14:00:00.0000000', timeZone: 'UTC' },
+      onlineMeeting: { joinUrl: JOIN_URL },
+    });
     const out = await resolveThreadId({ makeRequest }, { eventId: 'AAMk=' });
-    expect(out).toEqual({ threadId: THREAD, via: 'event' });
+    expect(out).toEqual({ threadId: THREAD, via: 'event', eventStart: '2026-10-01T14:00:00Z' });
     expect(makeRequest.mock.calls[0][0]).toBe(
-      '/me/events/AAMk%3D?$select=subject,isOnlineMeeting,onlineMeeting'
+      '/me/events/AAMk%3D?$select=subject,start,isOnlineMeeting,onlineMeeting'
     );
   });
 
@@ -143,110 +535,12 @@ describe('resolveThreadId', () => {
       /"Lunch" has no Teams meeting link/
     );
   });
-
-  it('asks for an identifier when given none', async () => {
-    await expect(resolveThreadId({ makeRequest: vi.fn() }, {})).rejects.toThrow(
-      /one of threadId, meetingUrl or eventId/
-    );
-  });
 });
 
-describe('get-meeting-transcript', () => {
-  it('sends the verified identity — not the token claims — to Note Taker', async () => {
-    const nt = stubNoteTaker(async () => transcriptOf('hello'));
-    const { call } = harness(nt);
-    const { payload, isError } = await call({ threadId: THREAD });
-
-    expect(isError).toBeUndefined();
-    expect(verifyCallerIdentity).toHaveBeenCalledWith('graph-token');
-    expect(nt.getTranscript).toHaveBeenCalledWith(THREAD, CALLER);
-    expect(payload).toMatchObject({
-      threadId: THREAD,
-      subject: 'IT Controls discussion',
-      resolvedVia: 'threadId',
-      totalChars: 5,
-      truncated: false,
-      transcript: { available: true, content: 'hello' },
-    });
-  });
-
-  it('refuses to call Note Taker when identity cannot be verified', async () => {
-    vi.mocked(verifyCallerIdentity).mockRejectedValue(
-      new IdentityVerificationError('nope', 'graph_rejected')
-    );
-    const nt = stubNoteTaker(async () => transcriptOf('x'));
-    const { call } = harness(nt);
-    const { payload, isError } = await call({ threadId: THREAD });
-
-    expect(isError).toBe(true);
-    expect(payload).toMatchObject({ error: 'identity_unverified', reason: 'graph_rejected' });
-    expect(nt.getTranscript).not.toHaveBeenCalled();
-  });
-
-  it('reports a missing caller credential', async () => {
-    vi.mocked(getRequestTokens).mockReturnValue(undefined);
-    const nt = stubNoteTaker(async () => transcriptOf('x'));
-    const { payload, isError } = await harness(nt).call({ threadId: THREAD });
-    expect(isError).toBe(true);
-    expect(payload.error).toBe('no_caller');
-  });
-
-  it('returns an unresolved_meeting error without calling Note Taker', async () => {
-    const nt = stubNoteTaker(async () => transcriptOf('x'));
-    const { payload, isError } = await harness(nt).call({ threadId: 'garbage' });
-    expect(isError).toBe(true);
-    expect(payload.error).toBe('unresolved_meeting');
-    expect(nt.getTranscript).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['not_participant', 403],
-    ['transcripts_disabled', 403],
-    ['meeting_not_found', 404],
-    ['disabled', 503],
-    ['unauthorized', 401],
-  ] as const)('relays a %s refusal as a structured error', async (refusal, status) => {
-    const nt = stubNoteTaker(async () => {
-      throw new NoteTakerError('why', refusal, status);
-    });
-    const { payload, isError } = await harness(nt).call({ meetingUrl: RECAP_URL });
-    expect(isError).toBe(true);
-    expect(payload.error).toBe(refusal);
-    expect(payload.message).toBe('why');
-    expect(typeof payload.note).toBe('string');
-  });
-
-  it('carries retryAfterSeconds on a rate limit', async () => {
-    const nt = stubNoteTaker(async () => {
-      throw new NoteTakerError('slow down', 'rate_limited', 429, 45);
-    });
-    const { payload } = await harness(nt).call({ threadId: THREAD });
-    expect(payload).toMatchObject({ error: 'rate_limited', retryAfterSeconds: 45 });
-  });
-
-  it('caps long transcripts at maxChars and says so', async () => {
-    const nt = stubNoteTaker(async () => transcriptOf('x'.repeat(1200)));
-    const { payload } = await harness(nt).call({ threadId: THREAD, maxChars: 500 });
-    expect(payload.transcript.content).toHaveLength(500);
-    expect(payload).toMatchObject({ totalChars: 1200, truncated: true });
-    expect(payload.note).toMatch(/cut at 500 of 1200/);
-  });
-
-  it('defaults the cap to DEFAULT_MAX_CHARS', async () => {
-    const nt = stubNoteTaker(async () => transcriptOf('y'.repeat(DEFAULT_MAX_CHARS + 1)));
-    const { payload } = await harness(nt).call({ threadId: THREAD });
-    expect(payload.transcript.content).toHaveLength(DEFAULT_MAX_CHARS);
-    expect(payload.truncated).toBe(true);
-  });
-
-  it('passes the no-transcript shape through with its reason', async () => {
-    const nt = stubNoteTaker(async () => ({
-      threadId: THREAD,
-      transcript: { available: false, reason: 'not_recorded' },
-    }));
-    const { payload, isError } = await harness(nt).call({ threadId: THREAD });
-    expect(isError).toBeUndefined();
-    expect(payload.transcript).toEqual({ available: false, reason: 'not_recorded' });
-    expect(payload.truncated).toBeUndefined();
+describe('toUtcIso', () => {
+  it('normalises to UTC with a Z', () => {
+    expect(toUtcIso('2026-10-01', 'f')).toBe('2026-10-01T00:00:00Z');
+    expect(toUtcIso('2026-10-01T10:00:00+02:00', 'f')).toBe('2026-10-01T08:00:00Z');
+    expect(() => toUtcIso('soon', 'startAfter')).toThrow(/startAfter "soon"/);
   });
 });
