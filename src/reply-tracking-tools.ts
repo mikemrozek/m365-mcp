@@ -215,7 +215,7 @@ export function registerReplyTrackingTools(
     subject?: string;
     recipient?: string;
   }): Promise<
-    { message: MailMessage } | { error: string } | { ambiguous: ReturnType<typeof describeSent>[] }
+    { message: MailMessage; alsoMatched?: ReturnType<typeof describeSent>[] } | { error: string }
   > {
     const messageId = params.messageId?.trim();
     const internetMessageId = params.internetMessageId?.trim();
@@ -280,10 +280,16 @@ export function registerReplyTrackingTools(
     if (!found.length) {
       return { error: `No sent message matched. ${SENT_ITEMS_HINT}` };
     }
-    // Several hits in ONE thread are your own follow-ups: the newest is the one to track.
+    // The newest match is tracked. Until tsq.27.1 several threads meant "ambiguous,
+    // pick one" — but people ask for "my last email to X", which names the newest,
+    // and the first live test spent a round trip on five candidates to get there.
+    // The other threads come back as alsoMatched so a wrong guess is one call away.
     const threads = new Set(found.map((m) => m.conversationId ?? m.id));
     if (found.length === 1 || threads.size === 1) return { message: found[0] };
-    return { ambiguous: found.map(describeSent) };
+    const others = found
+      .slice(1)
+      .filter((m) => (m.conversationId ?? m.id) !== (found[0].conversationId ?? found[0].id));
+    return { message: found[0], alsoMatched: others.slice(0, 4).map(describeSent) };
   }
 
   // --- track-reply -------------------------------------------------------------
@@ -297,9 +303,8 @@ export function registerReplyTrackingTools(
         'sent message in your mailbox (Sent Items), not on this server. Unlike ' +
         'watch-for-reply, nothing has to stay open while you wait.\n\n' +
         'Identify the sent message by messageId (from Sent Items), by internetMessageId, or ' +
-        'by subject and/or recipient — the most recent matching sent message is used; if ' +
-        'several different threads match, you get candidates back and should retry with a ' +
-        'messageId. Optionally restrict whose reply counts (waitingOn) and set a follow-up ' +
+        'by subject and/or recipient — the most recent matching sent message is tracked, and ' +
+        'other matching threads are listed as alsoMatched. Optionally restrict whose reply counts (waitingOn) and set a follow-up ' +
         'date (dueBy) after which it is reported overdue. Tracking the same message again ' +
         'replaces its settings.',
       {
@@ -352,14 +357,6 @@ export function registerReplyTrackingTools(
             );
           }
           if ('error' in resolved) return jsonResult({ error: resolved.error }, true);
-          if ('ambiguous' in resolved) {
-            return jsonResult({
-              status: 'ambiguous',
-              tracked: false,
-              candidates: resolved.ambiguous,
-              next: 'Several different sent threads matched. Call track-reply again with the messageId of the right one.',
-            });
-          }
 
           const msg = resolved.message;
           if (!msg?.id) return jsonResult({ error: 'The message came back without an id.' }, true);
@@ -403,6 +400,14 @@ export function registerReplyTrackingTools(
             storedOn:
               'your own sent message (mailbox extended property); nothing is kept on the server',
             next: 'Ask list-awaiting-replies in any later conversation; untrack-reply stops tracking.',
+            ...(resolved.alsoMatched?.length
+              ? {
+                  alsoMatched: resolved.alsoMatched,
+                  note:
+                    'Tracked the most recent match. If you meant one of alsoMatched, untrack ' +
+                    'this one and track that messageId instead.',
+                }
+              : {}),
           });
         })
     );
@@ -447,13 +452,19 @@ export function registerReplyTrackingTools(
           try {
             // No $orderby: combined with an extended-property filter Graph may reject
             // it, so the newest are picked client-side.
-            const res = (await graphClient.makeRequest(
-              `/me/messages${query({
-                $filter: AWAITING_FILTER,
-                $expand: EXPAND_TRACKING,
-                $select: SENT_SELECT,
-                $top: String(LIST_FETCH),
-              })}`
+            // Sent Items only, not the whole mailbox: an extended-property any() filter
+            // is an unindexed scan, and across /me/messages it hit 504 then 503
+            // ("Cannot query rows in a table") on the first live test. Tracked
+            // messages are sent messages, so nothing is lost by narrowing.
+            const res = (await withTransientRetry(() =>
+              graphClient.makeRequest(
+                `/me/mailFolders/sentitems/messages${query({
+                  $filter: AWAITING_FILTER,
+                  $expand: EXPAND_TRACKING,
+                  $select: SENT_SELECT,
+                  $top: String(LIST_FETCH),
+                })}`
+              )
             )) as { value?: MailMessage[]; '@odata.nextLink'?: string };
             tracked = (res?.value ?? []).filter(
               (m) => m.id && (prop(m, STATE_PROPERTY_ID) ?? STATE_AWAITING) === STATE_AWAITING
@@ -649,4 +660,15 @@ export function registerReplyTrackingTools(
         })
     );
   });
+}
+
+/** Graph's 502/503/504 are worth one more try after a short pause; anything else is not. */
+export async function withTransientRetry<T>(fn: () => Promise<T>, delayMs = 2000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (!/\b50[234]\b/.test((error as Error)?.message ?? '')) throw error;
+    await new Promise((r) => setTimeout(r, delayMs));
+    return fn();
+  }
 }

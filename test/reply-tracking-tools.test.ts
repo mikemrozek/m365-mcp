@@ -229,7 +229,7 @@ describe('track-reply', () => {
     expect(param(url, '$filter')).toBe("internetMessageId eq '<a''b@host>'");
   });
 
-  it('by subject: uses $search without $orderby and returns candidates when threads differ', async () => {
+  it('by subject: uses $search without $orderby and tracks the newest when threads differ', async () => {
     makeRequest.mockResolvedValueOnce({
       value: [
         sent('old', { sentDateTime: '2026-09-01T00:00:00Z', conversationId: 'c1' }),
@@ -241,18 +241,18 @@ describe('track-reply', () => {
       recipient: 'bob@tsq.com',
     });
     expect(isError).toBeUndefined();
-    expect(payload.status).toBe('ambiguous');
-    expect(payload.tracked).toBe(false);
-    expect(payload.candidates.map((c: { messageId: string }) => c.messageId)).toEqual([
-      'new',
-      'old',
-    ]);
+    // tsq.27.1: the newest is tracked; the other thread is offered, not demanded.
+    expect(payload.tracked).toBe(true);
+    expect(payload.messageId).toBe('new');
+    expect(payload.alsoMatched.map((c: { messageId: string }) => c.messageId)).toEqual(['old']);
     const url = makeRequest.mock.calls[0][0] as string;
     expect(param(url, '$search')).toBe(
       '"subject:\\"Budget Q4\\" AND recipients:\\"bob@tsq.com\\""'
     );
     expect(param(url, '$orderby')).toBeNull();
-    expect(makeRequest).toHaveBeenCalledTimes(1);
+    // Search, then the PATCH that marks the newest.
+    expect(makeRequest).toHaveBeenCalledTimes(2);
+    expect(makeRequest.mock.calls[1][0]).toContain('/me/messages/new');
   });
 
   it('by subject: several hits in one thread track the newest', async () => {
@@ -305,7 +305,7 @@ describe('list-awaiting-replies', () => {
     makeRequest.mockResolvedValueOnce({ value: [] });
     const { payload } = await call(h(), 'list-awaiting-replies', {});
     const url = makeRequest.mock.calls[0][0] as string;
-    expect(url.startsWith('/me/messages?')).toBe(true);
+    expect(url.startsWith('/me/mailFolders/sentitems/messages?')).toBe(true);
     expect(param(url, '$filter')).toBe(AWAITING_FILTER);
     expect(param(url, '$expand')).toBe(EXPAND_TRACKING);
     expect(param(url, '$orderby')).toBeNull();
@@ -428,5 +428,21 @@ describe('untrack-reply', () => {
     const { handlers } = harness({ makeRequest } as unknown as Partial<GraphClient>);
     const r = await call(handlers, 'untrack-reply', { messageId: 'x' });
     expect(r.isError).toBe(true);
+  });
+});
+
+describe('withTransientRetry', () => {
+  it('retries once on a Graph 503/504, and not on anything else', async () => {
+    const { withTransientRetry } = await import('../src/reply-tracking-tools.js');
+    const flaky = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Microsoft Graph API error: 504 Gateway Timeout'))
+      .mockResolvedValueOnce('ok');
+    await expect(withTransientRetry(flaky, 0)).resolves.toBe('ok');
+    expect(flaky).toHaveBeenCalledTimes(2);
+
+    const bad = vi.fn().mockRejectedValue(new Error('Microsoft Graph API error: 400 Bad Request'));
+    await expect(withTransientRetry(bad, 0)).rejects.toThrow('400');
+    expect(bad).toHaveBeenCalledTimes(1);
   });
 });
