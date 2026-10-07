@@ -124,6 +124,24 @@ describe('property ids and filter strings', () => {
 
 describe('isQualifyingReply', () => {
   const self = new Set(['me@tsq.com']);
+  it('excludes your own message in Sent Items even when its sender is a legacy DN', () => {
+    // tsq.27.1 live test: two of Mike's own follow-ups counted as replies.
+    const dn = '/O=EXCHANGELABS/OU=EXCHANGE ADMINISTRATIVE GROUP/CN=RECIPIENTS/CN=ABC-MIKE';
+    expect(
+      isQualifyingReply(
+        { id: 'r', from: who(dn), parentFolderId: 'SENT' },
+        { selfAddresses: self, sentFolderId: 'SENT' }
+      )
+    ).toBe(false);
+    // The same sender arriving in the Inbox is someone else's message: it counts.
+    expect(
+      isQualifyingReply(
+        { id: 'r', from: who('gmail@example.com'), parentFolderId: 'INBOX' },
+        { selfAddresses: self, sentFolderId: 'SENT' }
+      )
+    ).toBe(true);
+  });
+
   it('excludes self, drafts and the tracked message itself', () => {
     expect(isQualifyingReply({ id: 'r', from: who('ME@tsq.com') }, { selfAddresses: self })).toBe(
       false

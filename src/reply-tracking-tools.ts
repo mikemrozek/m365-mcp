@@ -157,15 +157,28 @@ function normalizeIso(value: string | undefined, field: string): string | { erro
 
 /**
  * Whether an inbound message counts as a reply. Pure; exported for tests.
- * Excluded: the tracked message itself, drafts, anything from the user's own
- * addresses, and — when waitingOn is set — anyone not on that list.
+ * Excluded: the tracked message itself, drafts, anything in Sent Items,
+ * anything from the user's own addresses, and — when waitingOn is set — anyone
+ * not on that list.
+ *
+ * The folder test is what actually catches the user's own messages. tsq.27.1's
+ * live test counted two of Mike's own follow-ups as replies: Exchange recorded
+ * their sender as the legacy DN (/O=EXCHANGELABS/…), which matches no SMTP
+ * address we can compare against. Where a message sits does not depend on how
+ * its sender was written.
  */
 export function isQualifyingReply(
   reply: MailMessage,
-  opts: { trackedId?: string; selfAddresses: Set<string>; waitingOn?: string[] }
+  opts: {
+    trackedId?: string;
+    selfAddresses: Set<string>;
+    waitingOn?: string[];
+    sentFolderId?: string;
+  }
 ): boolean {
   if (!reply.id || reply.id === opts.trackedId) return false;
   if (reply.isDraft) return false;
+  if (opts.sentFolderId && reply.parentFolderId === opts.sentFolderId) return false;
   const from = addr(reply.from).toLowerCase();
   if (!from || opts.selfAddresses.has(from)) return false;
   if (opts.waitingOn?.length) {
@@ -511,6 +524,8 @@ export function registerReplyTrackingTools(
                   trackedId: msg.id,
                   selfAddresses: self,
                   waitingOn: meta.waitingOn,
+                  // Tracked messages are read from Sent Items, so this is its id.
+                  sentFolderId: msg.parentFolderId,
                 })
               )
               .sort((a, b) => ts(a.receivedDateTime) - ts(b.receivedDateTime));
@@ -585,7 +600,7 @@ export function registerReplyTrackingTools(
             m.conversationId as string,
             new Date(ts(m.sentDateTime)).toISOString()
           ),
-          $select: 'id,from,receivedDateTime,subject,isDraft',
+          $select: 'id,from,receivedDateTime,subject,isDraft,parentFolderId',
           $top: String(REPLIES_PER_THREAD),
         })}`,
       }));
