@@ -35,6 +35,8 @@ export const STATE_DONE = 'done';
 export const LIST_CAP = 25;
 /** Tracked messages fetched before the client-side sort that picks the newest LIST_CAP. */
 const LIST_FETCH = 100;
+/** Where a tracked sent message can be: where it was sent, archived, or deleted to. */
+const TRACKED_FOLDERS = ['sentitems', 'archive', 'deleteditems'] as const;
 /** Inbound messages fetched per conversation. */
 const REPLIES_PER_THREAD = 10;
 /** Graph's ceiling on sub-requests in one $batch. */
@@ -52,6 +54,8 @@ export interface TrackingMeta {
 interface Address {
   emailAddress?: { address?: string; name?: string };
 }
+
+type TrackedMessage = MailMessage & { deleted?: boolean };
 
 interface MailMessage {
   id?: string;
@@ -439,7 +443,12 @@ export function registerReplyTrackingTools(
         'answered ones. since ("replies since Monday") lists only replies received after ' +
         'that time and includes every message that got one. Replies come back as sender, ' +
         'time and messageId — open one with get-mail-message. Your own messages in the ' +
-        `thread never count. Examines the ${LIST_CAP} most recently sent tracked messages.`,
+        'thread never count. A reply means a message in the same Outlook thread: a ' +
+        'FORWARD with a new subject starts a new thread, so answers to it are not counted ' +
+        'against the original — track the forward instead. Tracked messages are found in ' +
+        'Sent Items, Archive and Deleted Items (flagged deleted); one moved to another ' +
+        `folder drops out of the list. Examines the ${LIST_CAP} most recently sent tracked ` +
+        'messages.',
       {
         includeReplied: z
           .boolean()
@@ -460,34 +469,56 @@ export function registerReplyTrackingTools(
           const since = normalizeIso(params.since, 'since');
           if (typeof since === 'object') return jsonResult(since, true);
 
-          let tracked: MailMessage[];
+          let tracked: MailMessage[] = [];
           let moreExist = false;
+          let sentFolderId: string | undefined;
+          // Folder by folder, never the whole mailbox: an extended-property any()
+          // filter is an unindexed scan, and across /me/messages it hit 504 then 503
+          // on the first live test (tsq.27.1). But Sent Items alone lost a tracked
+          // message the moment Mike archived it (tsq.27.2 test, 2026-10-07) — the
+          // property travels with the message, so the folders it usually travels
+          // to are searched too. Deleted Items is searched so a deleted tracked
+          // message is reported, not silently dropped.
+          // No $orderby: with an extended-property filter Graph may reject it.
+          for (const folder of TRACKED_FOLDERS) {
+            try {
+              const res = (await withTransientRetry(() =>
+                graphClient.makeRequest(
+                  `/me/mailFolders/${folder}/messages${query({
+                    $filter: AWAITING_FILTER,
+                    $expand: EXPAND_TRACKING,
+                    $select: SENT_SELECT,
+                    $top: String(LIST_FETCH),
+                  })}`
+                )
+              )) as { value?: MailMessage[]; '@odata.nextLink'?: string };
+              const found = (res?.value ?? []).filter(
+                (m) => m.id && (prop(m, STATE_PROPERTY_ID) ?? STATE_AWAITING) === STATE_AWAITING
+              );
+              for (const m of found) {
+                if (folder === 'deleteditems') (m as TrackedMessage).deleted = true;
+              }
+              tracked.push(...found);
+              moreExist ||= Boolean(res?.['@odata.nextLink']);
+            } catch (error) {
+              // Sent Items is the one that must work; a mailbox without an
+              // Archive folder answers 404 there, which is not a failure.
+              if (folder === 'sentitems') {
+                return jsonResult(
+                  { error: `Could not list tracked messages: ${(error as Error).message}` },
+                  true
+                );
+              }
+              logger.info(`list-awaiting-replies: skipped ${folder} (${(error as Error).message})`);
+            }
+          }
           try {
-            // No $orderby: combined with an extended-property filter Graph may reject
-            // it, so the newest are picked client-side.
-            // Sent Items only, not the whole mailbox: an extended-property any() filter
-            // is an unindexed scan, and across /me/messages it hit 504 then 503
-            // ("Cannot query rows in a table") on the first live test. Tracked
-            // messages are sent messages, so nothing is lost by narrowing.
-            const res = (await withTransientRetry(() =>
-              graphClient.makeRequest(
-                `/me/mailFolders/sentitems/messages${query({
-                  $filter: AWAITING_FILTER,
-                  $expand: EXPAND_TRACKING,
-                  $select: SENT_SELECT,
-                  $top: String(LIST_FETCH),
-                })}`
-              )
-            )) as { value?: MailMessage[]; '@odata.nextLink'?: string };
-            tracked = (res?.value ?? []).filter(
-              (m) => m.id && (prop(m, STATE_PROPERTY_ID) ?? STATE_AWAITING) === STATE_AWAITING
-            );
-            moreExist = Boolean(res?.['@odata.nextLink']);
-          } catch (error) {
-            return jsonResult(
-              { error: `Could not list tracked messages: ${(error as Error).message}` },
-              true
-            );
+            const sent = (await graphClient.makeRequest(
+              `/me/mailFolders/sentitems${query({ $select: 'id' })}`
+            )) as { id?: string };
+            sentFolderId = sent?.id;
+          } catch {
+            // Without it the self-address check still applies; the folder check is extra.
           }
 
           tracked.sort((a, b) => ts(b.sentDateTime) - ts(a.sentDateTime));
@@ -505,6 +536,8 @@ export function registerReplyTrackingTools(
           for (const msg of tracked) {
             const meta = parseMeta(prop(msg, META_PROPERTY_ID));
             const self = new Set(
+              // The tracked message's own sender is often the legacy DN
+              // (/O=EXCHANGELABS/…) rather than SMTP; both forms are the user.
               [addr(msg.from), addr(msg.sender), actor?.upn ?? '']
                 .map((a) => a.toLowerCase())
                 .filter(Boolean)
@@ -524,8 +557,7 @@ export function registerReplyTrackingTools(
                   trackedId: msg.id,
                   selfAddresses: self,
                   waitingOn: meta.waitingOn,
-                  // Tracked messages are read from Sent Items, so this is its id.
-                  sentFolderId: msg.parentFolderId,
+                  sentFolderId,
                 })
               )
               .sort((a, b) => ts(a.receivedDateTime) - ts(b.receivedDateTime));
@@ -546,6 +578,14 @@ export function registerReplyTrackingTools(
             items.push({
               ...describeSent(msg),
               status,
+              ...((msg as TrackedMessage).deleted
+                ? {
+                    deleted: true,
+                    note:
+                      'This sent message is in Deleted Items. Tracking ends when it is ' +
+                      'emptied; untrack-reply now if you no longer need it.',
+                  }
+                : {}),
               awaitingFrom: meta.waitingOn ?? 'anyone but you',
               ...(meta.waitingOn?.length
                 ? { stillWaitingOn: meta.waitingOn.filter((w) => !repliedBy.has(w.toLowerCase())) }

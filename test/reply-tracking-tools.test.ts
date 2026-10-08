@@ -371,6 +371,54 @@ describe('list-awaiting-replies', () => {
     expect(param(sub.url, '$select')).not.toContain('bodyPreview');
   });
 
+  it('finds tracked messages in Archive and Deleted Items, not just Sent Items', async () => {
+    // tsq.27.2 live test: Mike archived the tracked message and it vanished.
+    const DN = '/O=EXCHANGELABS/OU=EXCHANGE ADMINISTRATIVE GROUP/CN=RECIPIENTS/CN=X-MIKE';
+    makeRequest.mockImplementation(async (url: string) => {
+      if (url.startsWith('/me/mailFolders/sentitems/messages')) return { value: [] };
+      if (url.startsWith('/me/mailFolders/archive/messages'))
+        return { value: [tracked('arch', {}, { parentFolderId: 'ARCHIVE', from: who(DN) })] };
+      if (url.startsWith('/me/mailFolders/deleteditems/messages'))
+        return { value: [tracked('del', {}, { parentFolderId: 'DELETED' })] };
+      if (url.startsWith('/me/mailFolders/sentitems?')) return { id: 'SENT' };
+      throw new Error(`unexpected ${url}`);
+    });
+    repliesTable({
+      // Own follow-up (sits in Sent Items, legacy-DN sender) must not count.
+      arch: [
+        {
+          id: 'own',
+          from: who(DN),
+          parentFolderId: 'SENT',
+          receivedDateTime: '2026-10-02T00:00:00Z',
+        },
+      ],
+    });
+    const { payload } = await call(h(), 'list-awaiting-replies', {});
+    const byId = Object.fromEntries(
+      payload.items.map((i: { messageId: string }) => [i.messageId, i])
+    );
+    expect(byId.arch.status).toBe('awaiting');
+    expect(byId.del.deleted).toBe(true);
+    expect(byId.arch.deleted).toBeUndefined();
+  });
+
+  it('treats a missing Archive folder as empty, but a Sent Items failure as an error', async () => {
+    makeRequest.mockImplementation(async (url: string) => {
+      if (url.startsWith('/me/mailFolders/archive/'))
+        throw new Error('Microsoft Graph API error: 404 Not Found');
+      if (url.startsWith('/me/mailFolders/sentitems?')) return { id: 'SENT' };
+      return { value: [] };
+    });
+    const ok = await call(h(), 'list-awaiting-replies', {});
+    expect(ok.isError).toBeUndefined();
+
+    makeRequest.mockReset();
+    makeRequest.mockRejectedValue(new Error('Microsoft Graph API error: 403 Forbidden'));
+    const bad = await call(h(), 'list-awaiting-replies', {});
+    expect(bad.isError).toBe(true);
+  });
+
   it('omits replied messages by default', async () => {
     makeRequest.mockResolvedValueOnce({ value: [tracked('a'), tracked('b')] });
     repliesTable({
