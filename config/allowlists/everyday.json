@@ -106,6 +106,7 @@
     "list-users",
     "list-watches",
     "move-mail-message",
+    "notify-me",
     "open-sharing-link",
     "parse-teams-url",
     "put-file",

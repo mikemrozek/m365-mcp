@@ -24,6 +24,7 @@ import { registerFileTextTools } from './file-text-tools.js';
 import { registerFileTools } from './file-tools.js';
 import { registerReplyTrackingTools, trackingProperties } from './reply-tracking-tools.js';
 import { registerChatReplyTools } from './chat-reply-tools.js';
+import { registerNotifyTools } from './notify-tools.js';
 import { registerMeetingTools } from './meeting-tools.js';
 import { registerInferenceTools } from './inference-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
@@ -2580,6 +2581,26 @@ export function registerGraphTools(
   // with nobody noticing. Chat messages cannot carry the reply-tracking marker,
   // so this is computed live from the chats themselves and stores nothing.
   registerChatReplyTools(server, graphClient, {
+    isToolEnabled,
+    readOnly,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+    skip: (name: string) => {
+      logger.info(`Skipping write tool ${name} - read-only mode`);
+      skippedCount++;
+    },
+  });
+
+  // ---- notify-me (tsq.28) -----------------------------------------------------
+  // Reaches only the signed-in user, so a scheduled task can be allowed to run
+  // it unattended without being allowed to message anyone else.
+  registerNotifyTools(server, graphClient, {
     isToolEnabled,
     readOnly,
     push: (name: string) => {

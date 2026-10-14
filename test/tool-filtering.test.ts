@@ -69,6 +69,7 @@ const CUSTOM_TOOLS = [
   'track-reply',
   'list-awaiting-replies',
   'list-chat-replies',
+  'notify-me',
   'untrack-reply',
 ];
 

@@ -96,6 +96,7 @@ const CUSTOM_TOOLS_ALL = [
   'put-file',
   'track-reply',
   'untrack-reply',
+  'notify-me',
 ];
 
 const sorted = (names: unknown[]) => [...(names as string[])].sort();
