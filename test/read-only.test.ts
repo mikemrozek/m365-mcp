@@ -70,6 +70,7 @@ const CUSTOM_TOOLS_READ_ONLY = [
   'get-meeting',
   'open-sharing-link',
   'list-awaiting-replies',
+  'list-chat-replies',
   'parse-teams-url',
   'list-conversation-messages',
   'list-drafts',

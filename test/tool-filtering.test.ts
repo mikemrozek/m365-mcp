@@ -68,6 +68,7 @@ const CUSTOM_TOOLS = [
   'open-sharing-link',
   'track-reply',
   'list-awaiting-replies',
+  'list-chat-replies',
   'untrack-reply',
 ];
 

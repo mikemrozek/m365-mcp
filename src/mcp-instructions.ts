@@ -13,6 +13,7 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
     'When you need an organizational user or recipient address, resolve it with list-users (or another directory tool); do not invent SMTP addresses.',
     'Directory $search on collections such as /users or /groups requires ConsistencyLevel: eventual when the tool exposes that header.',
     'Teams chat and channel messages: prefer HTML contentType in the body; plain text is often mangled by Graph.',
+    'You act only while writing a response: you cannot resume a conversation later, so never promise to continue automatically when a reply arrives. To follow up later, track the email (trackReply on send-mail, or track-reply) and tell the user to ask again; list-awaiting-replies and list-chat-replies answer "did anyone reply?" in any conversation.',
     // Stated once here rather than repeated on all 136 tools. Measured 2026-09-02:
     // the shared query parameters carried ~24,000 tokens of duplicated prose across
     // the catalogue, which is also noise for tool search, since discovery matches on

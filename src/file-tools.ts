@@ -179,6 +179,31 @@ function jsonResult(payload: unknown, isError = false) {
   };
 }
 
+/**
+ * put-file 409 nameAlreadyExists ×9 in the week to 2026-10-09, one user. The
+ * default is 'rename', so these were calls passing conflictBehavior 'fail' —
+ * and the raw Graph 409 did not say what to change, so the model resent the
+ * same call. Name the fix instead. `status` is in the payload so the usage log
+ * still records the 409 under Graph's own code.
+ */
+function nameTakenResult(error: unknown, name: string, folder: string, conflict: string) {
+  const message = (error as Error)?.message ?? '';
+  if (!/\b409\b/.test(message) || !/nameAlreadyExists/i.test(message)) return undefined;
+  logger.info(`put-file: 409 nameAlreadyExists for ${name} (conflictBehavior=${conflict})`);
+  return jsonResult(
+    {
+      error: 'nameAlreadyExists',
+      status: 409,
+      message:
+        `A file named "${name}" already exists in ${folder}. Nothing was uploaded. Call ` +
+        "put-file again with conflictBehavior 'rename' (the default — keeps both, the new " +
+        "file gets a numbered name) or 'replace' (overwrites the existing file; only if " +
+        'the user meant to replace it).',
+    },
+    true
+  );
+}
+
 /** Strips characters OneDrive rejects and prefixes for collision safety. */
 function safeStagedName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|]/g, '_');
@@ -763,14 +788,21 @@ export function registerFileTools(
               );
             }
 
-            const item = (await graphClient.makeRequest(
-              `${target}/content?@microsoft.graph.conflictBehavior=${conflict}`,
-              {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/octet-stream' },
-                body: buffer,
-              }
-            )) as { id?: string; name?: string; size?: number; webUrl?: string };
+            let item: { id?: string; name?: string; size?: number; webUrl?: string };
+            try {
+              item = (await graphClient.makeRequest(
+                `${target}/content?@microsoft.graph.conflictBehavior=${conflict}`,
+                {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/octet-stream' },
+                  body: buffer,
+                }
+              )) as typeof item;
+            } catch (error) {
+              const taken = nameTakenResult(error, name, folder, conflict);
+              if (taken) return taken;
+              throw error;
+            }
 
             const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
             logger.info(`put-file: ${name} uploaded inline (${buffer.byteLength} bytes)`);
@@ -805,13 +837,20 @@ export function registerFileTools(
             );
           }
 
-          const session = (await graphClient.makeRequest(`${target}/createUploadSession`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              item: { '@microsoft.graph.conflictBehavior': conflict, name },
-            }),
-          })) as { uploadUrl?: string; expirationDateTime?: string };
+          let session: { uploadUrl?: string; expirationDateTime?: string };
+          try {
+            session = (await graphClient.makeRequest(`${target}/createUploadSession`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                item: { '@microsoft.graph.conflictBehavior': conflict, name },
+              }),
+            })) as typeof session;
+          } catch (error) {
+            const taken = nameTakenResult(error, name, folder, conflict);
+            if (taken) return taken;
+            throw error;
+          }
 
           if (!session?.uploadUrl) {
             return jsonResult({ error: 'Microsoft did not return an upload URL.' }, true);

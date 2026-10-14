@@ -787,6 +787,48 @@ describe('put-file — the write side', () => {
     expect(makeRequest.mock.calls[0][0]).toContain('createUploadSession');
   });
 
+  // tsq.28: 409 nameAlreadyExists ×9 in a week, each resent unchanged by the model.
+  const nameTaken = new Error(
+    'Microsoft Graph API error: 409 Conflict - {"error":{"code":"nameAlreadyExists","message":"Name already exists"}}'
+  );
+
+  it('turns an inline 409 nameAlreadyExists into an error that names the fix', async () => {
+    makeRequest.mockRejectedValueOnce(nameTaken);
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'put-file', {
+      name: 'note.txt',
+      contentBase64: b64('hello'),
+      conflictBehavior: 'fail',
+    });
+
+    expect(isError).toBe(true);
+    expect(payload.error).toBe('nameAlreadyExists');
+    expect(payload.status).toBe(409);
+    expect(payload.message).toContain("'rename'");
+    expect(payload.message).toContain("'replace'");
+    expect(payload.message).toContain('note.txt');
+  });
+
+  it('does the same when the upload session is refused for the name', async () => {
+    makeRequest.mockRejectedValueOnce(nameTaken);
+    const { handlers } = harness(client());
+    const { payload, isError } = await call(handlers, 'put-file', {
+      name: 'deck.pptx',
+      sizeBytes: 9_000_000,
+      conflictBehavior: 'fail',
+    });
+    expect(isError).toBe(true);
+    expect(payload.error).toBe('nameAlreadyExists');
+  });
+
+  it('still throws any other Graph failure unchanged', async () => {
+    makeRequest.mockRejectedValueOnce(new Error('Microsoft Graph API error: 403 Forbidden - {}'));
+    const { handlers } = harness(client());
+    await expect(
+      call(handlers, 'put-file', { name: 'note.txt', contentBase64: b64('hello') })
+    ).rejects.toThrow(/403/);
+  });
+
   it('asks for one of the two inputs rather than guessing', async () => {
     const { handlers } = harness(client());
     const { payload, isError } = await call(handlers, 'put-file', { name: 'mystery.bin' });

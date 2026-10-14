@@ -47,6 +47,8 @@ const CUSTOM_TOOLS = [
   'track-reply',
   'list-awaiting-replies',
   'untrack-reply',
+  // tsq.28
+  'list-chat-replies',
   // tsq.25: env-gated (registers only with INFERENCE_ENDPOINT set), but part of
   // the advertised universe — the allowlist carries it so go-live is env-only.
   'delegate-analysis',

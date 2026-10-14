@@ -162,6 +162,7 @@ describe('Calendar View Tools', () => {
         'open-sharing-link',
         'track-reply',
         'list-awaiting-replies',
+        'list-chat-replies',
         'untrack-reply',
       ]);
 

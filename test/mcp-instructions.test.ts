@@ -23,3 +23,16 @@ describe('buildMcpServerInstructions', () => {
     expect(s).toContain('read-only');
   });
 });
+
+describe('no automatic resume (tsq.28)', () => {
+  it('tells Claude it cannot continue later and where follow-up lives', () => {
+    const text = buildMcpServerInstructions({
+      discovery: false,
+      orgMode: true,
+      readOnly: false,
+      multiAccount: false,
+    });
+    expect(text).toContain('never promise to continue automatically');
+    expect(text).toContain('list-chat-replies');
+  });
+});

@@ -69,7 +69,8 @@
     "method": "post",
     "toolName": "send-mail",
     "scopes": ["Mail.Send"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients.",
+    "compactBody": "{ message: { subject: 'Q3 numbers', body: { contentType: 'HTML', content: '<p>Hi</p>' }, toRecipients: [{ emailAddress: { address: 'someone@example.com' } }], ccRecipients: [...] }, saveToSentItems: true }. Everything about the email goes inside message; saveToSentItems sits beside it. Each recipient is { emailAddress: { address } }, not a bare string. Resolve addresses with list-users — never guess them."
   },
   {
     "pathPattern": "/users/{user-id}/messages",
@@ -113,6 +114,7 @@
     "method": "post",
     "toolName": "create-draft-email",
     "scopes": ["Mail.ReadWrite"],
+    "compactBody": "The message itself, with no wrapper: { subject, body: { contentType: 'HTML', content }, toRecipients: [{ emailAddress: { address } }], ccRecipients: [...] }. Each recipient is { emailAddress: { address } }, not a bare string. Resolve addresses with list-users — never guess them.",
     "description": "Compose a new email as a draft without sending it. Flow: create-draft-email → attach-file (optional) → send-draft-message."
   },
   {
@@ -120,7 +122,7 @@
     "method": "delete",
     "toolName": "delete-mail-message",
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Soft delete — moves the message to Deleted Items. IMPORTANT: moving changes the message id, so calling this again with the SAME id fails with 404 ErrorItemNotFound. Do not retry a delete that appears to have failed — check Deleted Items first, because the first call usually succeeded. To permanently delete, list the item in Deleted Items (list-mail-folder-messages with mailFolder-id 'deleteditems') to get its NEW id, then delete that id.",
+    "llmTip": "Soft delete — moves the message to Deleted Items. IMPORTANT: moving changes the message id, so calling this again with the SAME id finds nothing; the server reports that as success with alreadyDeleted: true. Do not retry a delete that appears to have failed — check Deleted Items first, because the first call usually succeeded. To permanently delete, list the item in Deleted Items (list-mail-folder-messages with mailFolder-id 'deleteditems') to get its NEW id, then delete that id.",
     "description": "Delete an email, moving it to Deleted Items."
   },
   {
@@ -1412,7 +1414,8 @@
     "method": "get",
     "toolName": "get-sharepoint-site-by-path",
     "workScopes": ["Sites.Read.All"],
-    "description": "Find a SharePoint site by its URL path, when you know the address but not the site id. To find one by name, use search-sharepoint-sites."
+    "description": "Find a SharePoint site by its URL, when you know the address but not the site id. To find one by name, use search-sharepoint-sites.",
+    "llmTip": "Pass url with the full site address (https://contoso.sharepoint.com/sites/marketing) — a page or document-library URL inside the site works too, the server trims it to the site. Or pass hostname plus path. Returns the site, whose id get-sharepoint-site and list-sharepoint-site-drives take."
   },
   {
     "pathPattern": "/sites/delta()",
@@ -1442,14 +1445,14 @@
     "method": "get",
     "toolName": "list-online-meetings",
     "workScopes": ["OnlineMeetings.Read"],
-    "llmTip": "List online meetings. Use $filter=joinWebUrl eq '{url}' to find a specific meeting by its Teams join link. Returns meeting IDs needed for transcript access."
+    "llmTip": "Looks up ONE Teams meeting by its join link — Graph cannot list a user's meetings. filter is required: JoinWebUrl eq '{url}'. Get the URL from the calendar event (get-calendar-event → onlineMeeting.joinUrl), or convert a recap or short link with parse-teams-url first. Returns the meeting id get-online-meeting and transcript access need. To see what meetings exist, use list-calendar-events or get-calendar-view."
   },
   {
     "pathPattern": "/me/onlineMeetings/{onlineMeeting-id}",
     "method": "get",
     "toolName": "get-online-meeting",
     "workScopes": ["OnlineMeetings.Read"],
-    "llmTip": "Gets a specific online meeting by ID. Returns full details including subject, startDateTime, endDateTime, joinWebUrl, chatInfo (threadId for meeting chat), participants (organizer, attendees), lobbyBypassSettings, and videoTeleconferenceId. Use list-online-meetings first to find the meeting ID."
+    "llmTip": "Gets an online meeting by its onlineMeeting id — NOT a calendar event id. Graph answers this reliably only for meetings created through the API (create-online-meeting); for an ordinary meeting scheduled in Outlook or Teams it can fail with 501 NotImplemented. For those, call list-online-meetings with filter JoinWebUrl eq '{url}' (join URL from the calendar event's onlineMeeting.joinUrl) — it returns the same details. Returns subject, start/end, joinWebUrl, chatInfo (threadId for the meeting chat), participants and videoTeleconferenceId."
   },
   {
     "pathPattern": "/me/onlineMeetings",

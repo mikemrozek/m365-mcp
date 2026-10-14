@@ -42,6 +42,14 @@ import {
  * read when the user is present.
  */
 
+/** What a watch can and cannot do, stated where Claude will read it (tsq.28). */
+export const NO_AUTO_RESUME =
+  'You cannot resume this conversation by yourself: once your response ends, nothing ' +
+  'wakes you, even if the user keeps the chat open. NEVER tell the user you will ' +
+  'continue automatically or get back to them when a reply arrives. If you stop waiting, ' +
+  'tell them to ask "did anyone reply?" later (list-awaiting-replies for email, ' +
+  'list-chat-replies for Teams), or to set up a scheduled task that checks for them.';
+
 /** Subscription expiry we request, per resource family. */
 const EXPIRY_MINUTES = {
   // Graph maximum for Outlook message resources is 10,080 minutes (under 7
@@ -411,7 +419,9 @@ export async function matchWatches(
         // notification either way. Memoized so a vanished item is not
         // re-fetched on every wait cycle.
         memoNoMatch(entry, w.watchId);
-        logger.info(`watch match fetch skipped for ${entry.resourceId}: ${(error as Error).message}`);
+        logger.info(
+          `watch match fetch skipped for ${entry.resourceId}: ${(error as Error).message}`
+        );
       }
     }
   }
@@ -791,6 +801,14 @@ export function registerNotificationTools(
   });
 
   // --- watch-for-reply ------------------------------------------------------
+  // Scott, 2026-10-14: "my claude seems to continually say that after it sends
+  // a teams message it will wait for a reply and continue automatically when
+  // received but it doesn't work." 34 watch-for-reply calls in 30 days against
+  // ONE wait-for-notifications: Claude set the watch, promised to resume, and
+  // ended its response. "Works only while a session is open" was read as "while
+  // the tab is open". Claude acts only while it is writing a response; once
+  // that ends, nothing resumes the conversation. Said plainly, in the
+  // description AND in the result Claude reads just before it answers.
   register('watch-for-reply', true, () => {
     server.tool(
       'watch-for-reply',
@@ -803,9 +821,12 @@ export function registerNotificationTools(
         'Flow: send-mail / send-chat-message → watch-for-reply → wait-for-notifications ' +
         '(watchId, looped) → on wake, get-mail-message or get-chat-message with the returned ' +
         'id.\n\n' +
-        'Works only while a session is open to do the waiting — nothing can wake a closed ' +
-        'conversation. Watches live in memory: a connector restart clears them, and ' +
-        'list-watches shows what survives.',
+        `${NO_AUTO_RESUME}\n\n` +
+        'Use this only when you will keep waiting in THIS response (looping ' +
+        'wait-for-notifications). To follow up later instead: for email, track-reply (or ' +
+        'trackReply on send-mail) and list-awaiting-replies; for Teams, list-chat-replies. ' +
+        'Watches live in memory: a connector restart clears them, and list-watches shows ' +
+        'what survives.',
       {
         messageId: z
           .string()
@@ -895,9 +916,9 @@ export function registerNotificationTools(
             // Confirm the chat exists and capture its topic for the wake.
             let topic: string | undefined;
             try {
-              const chat = (await graphClient.makeRequest(
-                `/chats/${chatId}?$select=id,topic`
-              )) as { topic?: string };
+              const chat = (await graphClient.makeRequest(`/chats/${chatId}?$select=id,topic`)) as {
+                topic?: string;
+              };
               topic = chat?.topic ?? undefined;
             } catch (error) {
               return jsonResult(
@@ -931,13 +952,14 @@ export function registerNotificationTools(
           return jsonResult({
             ...describeWatch(watch),
             subscriptionExpiresAt: new Date(
-              listSubscriptions(actor.oid).find(
-                (r) => r.subscriptionId === watch.subscriptionId
-              )?.expiresAt ?? Date.now()
+              listSubscriptions(actor.oid).find((r) => r.subscriptionId === watch.subscriptionId)
+                ?.expiresAt ?? Date.now()
             ).toISOString(),
             next:
-              `Loop wait-for-notifications with watchId '${watch.watchId}'. Each quiet cycle ` +
-              'is cheap; the wake carries your note and the reply’s id.',
+              `Loop wait-for-notifications with watchId '${watch.watchId}' now, in this ` +
+              'response. Each quiet cycle is cheap; the wake carries your note and the ' +
+              'reply’s id.',
+            important: NO_AUTO_RESUME,
           });
         })
     );

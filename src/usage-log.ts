@@ -198,3 +198,172 @@ export async function withUsageLog<
 }
 
 export default usageLogger;
+
+// ---- Per-user daily ceilings (tsq.28) ----------------------------------------
+
+/**
+ * Optional per-user, per-UTC-day ceilings on the two kinds of action that cannot
+ * be taken back: deleting mail and sending as the user. Off unless configured —
+ * MS365_MCP_DAILY_LIMIT_DELETE / MS365_MCP_DAILY_LIMIT_SEND set to a positive
+ * integer; unset, empty or 0 means no ceiling.
+ *
+ * This is a brake on a runaway loop (a model deleting a mailbox one message at a
+ * time, or replying to every thread), not an accounting system. The counts are
+ * held in this process's memory: correct for the single replica the container
+ * app runs, but they reset on every restart or deploy, and a second replica
+ * would keep its own count. Good enough to stop a loop within a day; not a
+ * quota anyone should be billed against.
+ *
+ * Tools are named explicitly. A new send or delete tool is NOT covered until it
+ * is added here — chosen over a pattern so a rename cannot silently widen or
+ * narrow what is limited.
+ */
+export type DailyLimitKind = 'delete' | 'send';
+
+const DAILY_LIMITED_TOOLS: Record<string, DailyLimitKind> = {
+  'delete-mail-message': 'delete',
+  'send-mail': 'send',
+  'send-draft-message': 'send',
+  'reply-mail-message': 'send',
+  'reply-all-mail-message': 'send',
+  'forward-mail-message': 'send',
+  'send-shared-mailbox-mail': 'send',
+  'send-chat-message': 'send',
+};
+
+const DAILY_LIMIT_ENV: Record<DailyLimitKind, string> = {
+  delete: 'MS365_MCP_DAILY_LIMIT_DELETE',
+  send: 'MS365_MCP_DAILY_LIMIT_SEND',
+};
+
+/** Read per call, not at import, so a test (or a restart with new env) takes effect. */
+function dailyLimitFor(kind: DailyLimitKind): number | undefined {
+  const raw = process.env[DAILY_LIMIT_ENV[kind]];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+interface DailyCount {
+  day: string;
+  count: number;
+  /** Thresholds already reported today, so a refund-and-retry cannot repeat the alert. */
+  alerted: Set<number>;
+}
+
+const dailyCounts = new Map<string, DailyCount>();
+
+function utcDay(now: Date): string {
+  return now.toISOString().slice(0, 10);
+}
+
+export interface DailyAllowance {
+  /** Undo the reservation — call when the action failed and did not happen. */
+  refund(): void;
+}
+
+export interface DailyLimitRefusal {
+  refused: true;
+  kind: DailyLimitKind;
+  limit: number;
+}
+
+/**
+ * Reserve one unit of today's allowance for `tool`. Returns null when the tool
+ * is not limited or its ceiling is off; a refusal when the user is at the
+ * ceiling; otherwise an allowance whose refund() gives the unit back.
+ *
+ * Reserved before the call rather than counted after it: two concurrent sends
+ * must not both see "one left". A failed call is refunded, so a Graph error
+ * does not use up the day.
+ */
+export function reserveDailyAllowance(
+  tool: string,
+  now: Date = new Date()
+): DailyAllowance | DailyLimitRefusal | null {
+  const kind = DAILY_LIMITED_TOOLS[tool];
+  if (!kind) return null;
+  const limit = dailyLimitFor(kind);
+  if (limit === undefined) return null;
+
+  const actor = getRequestActor();
+  // stdio/CLI mode has one local user and no actor; it still gets a ceiling.
+  const key = `${actor?.oid ?? 'local'}:${kind}`;
+  const day = utcDay(now);
+  let entry = dailyCounts.get(key);
+  if (!entry || entry.day !== day) {
+    entry = { day, count: 0, alerted: new Set() };
+    dailyCounts.set(key, entry);
+  }
+  if (entry.count >= limit) return { refused: true, kind, limit };
+
+  entry.count += 1;
+  const reserved = entry;
+  // 80% gives the weekly report (and any alert rule on m365-limit) warning
+  // before a user is actually stopped; 100% records that they were.
+  for (const threshold of [Math.ceil(limit * 0.8), limit]) {
+    if (reserved.count === threshold && !reserved.alerted.has(threshold)) {
+      reserved.alerted.add(threshold);
+      logLimitEvent(tool, kind, reserved.count, limit, actor);
+    }
+  }
+  return {
+    refund() {
+      // Only within the same day; yesterday's refund must not dent today's count.
+      if (reserved.day === utcDay(new Date()) && reserved.count > 0) reserved.count -= 1;
+    },
+  };
+}
+
+function logLimitEvent(
+  tool: string,
+  kind: DailyLimitKind,
+  count: number,
+  limit: number,
+  actor: ReturnType<typeof getRequestActor>
+): void {
+  if (!enabled) return;
+  usageLogger.info('daily-limit', {
+    type: 'm365-limit', // stable marker, alongside m365-usage
+    kind,
+    tool,
+    count,
+    limit,
+    oid: actor?.oid,
+    upn: actor?.upn,
+    tid: actor?.tid,
+  });
+}
+
+export function isDailyLimitRefusal(
+  value: DailyAllowance | DailyLimitRefusal | null
+): value is DailyLimitRefusal {
+  return value !== null && 'refused' in value;
+}
+
+/** The refusal as a tool result. `error` is the code the usage log records. */
+export function dailyLimitRefusalResult(tool: string, refusal: DailyLimitRefusal) {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          error: 'daily_limit_exceeded',
+          tool,
+          limit: refusal.limit,
+          message:
+            `This account has reached today's limit of ${refusal.limit} ${refusal.kind} ` +
+            'actions through this connector. The limit resets at 00:00 UTC. Nothing was ' +
+            `${refusal.kind === 'send' ? 'sent' : 'deleted'}. Tell the user; do not retry, ` +
+            'and do not work around it with a different tool.',
+        }),
+      },
+    ],
+    isError: true as const,
+  };
+}
+
+/** Test hook: forget every count. */
+export function resetDailyCountsForTests(): void {
+  dailyCounts.clear();
+}

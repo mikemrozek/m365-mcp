@@ -496,19 +496,3 @@ describe('untrack-reply', () => {
     expect(r.isError).toBe(true);
   });
 });
-
-describe('withTransientRetry', () => {
-  it('retries once on a Graph 503/504, and not on anything else', async () => {
-    const { withTransientRetry } = await import('../src/reply-tracking-tools.js');
-    const flaky = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('Microsoft Graph API error: 504 Gateway Timeout'))
-      .mockResolvedValueOnce('ok');
-    await expect(withTransientRetry(flaky, 0)).resolves.toBe('ok');
-    expect(flaky).toHaveBeenCalledTimes(2);
-
-    const bad = vi.fn().mockRejectedValue(new Error('Microsoft Graph API error: 400 Bad Request'));
-    await expect(withTransientRetry(bad, 0)).rejects.toThrow('400');
-    expect(bad).toHaveBeenCalledTimes(1);
-  });
-});

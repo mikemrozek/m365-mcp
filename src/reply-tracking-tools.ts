@@ -142,6 +142,30 @@ function prop(msg: MailMessage, id: string): string | undefined {
     ?.value;
 }
 
+/**
+ * The two properties that mark a message as tracked, ready to embed in a
+ * message body. tsq.28 "track at send" (Scott, 2026-10-13: "it would not
+ * depend on the agent remembering a second call"): send-mail and the draft and
+ * reply paths carry these inside the message they create, so the Sent Items
+ * copy is born tracked — one call, no lookup afterwards.
+ */
+export function trackingProperties(opts: { dueBy?: string; waitingOn?: string[] } = {}): {
+  id: string;
+  value: string;
+}[] {
+  const waitingOn = opts.waitingOn?.map((a) => a.trim().toLowerCase()).filter(Boolean);
+  const meta: TrackingMeta = {
+    v: 1,
+    trackedAt: new Date().toISOString(),
+    ...(opts.dueBy ? { dueBy: opts.dueBy } : {}),
+    ...(waitingOn?.length ? { waitingOn } : {}),
+  };
+  return [
+    { id: STATE_PROPERTY_ID, value: STATE_AWAITING },
+    { id: META_PROPERTY_ID, value: JSON.stringify(meta) },
+  ];
+}
+
 export function parseMeta(raw: string | undefined): Partial<TrackingMeta> {
   if (!raw) return {};
   try {
@@ -482,15 +506,14 @@ export function registerReplyTrackingTools(
           // No $orderby: with an extended-property filter Graph may reject it.
           for (const folder of TRACKED_FOLDERS) {
             try {
-              const res = (await withTransientRetry(() =>
-                graphClient.makeRequest(
-                  `/me/mailFolders/${folder}/messages${query({
-                    $filter: AWAITING_FILTER,
-                    $expand: EXPAND_TRACKING,
-                    $select: SENT_SELECT,
-                    $top: String(LIST_FETCH),
-                  })}`
-                )
+              // Transient 5xx and 429 are retried once by the Graph client (tsq.28).
+              const res = (await graphClient.makeRequest(
+                `/me/mailFolders/${folder}/messages${query({
+                  $filter: AWAITING_FILTER,
+                  $expand: EXPAND_TRACKING,
+                  $select: SENT_SELECT,
+                  $top: String(LIST_FETCH),
+                })}`
               )) as { value?: MailMessage[]; '@odata.nextLink'?: string };
               const found = (res?.value ?? []).filter(
                 (m) => m.id && (prop(m, STATE_PROPERTY_ID) ?? STATE_AWAITING) === STATE_AWAITING
@@ -715,15 +738,4 @@ export function registerReplyTrackingTools(
         })
     );
   });
-}
-
-/** Graph's 502/503/504 are worth one more try after a short pause; anything else is not. */
-export async function withTransientRetry<T>(fn: () => Promise<T>, delayMs = 2000): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (!/\b50[234]\b/.test((error as Error)?.message ?? '')) throw error;
-    await new Promise((r) => setTimeout(r, delayMs));
-    return fn();
-  }
 }

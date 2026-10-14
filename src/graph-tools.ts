@@ -1,6 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import logger from './logger.js';
-import { describeFailure, logToolUsage, withUsageLog } from './usage-log.js';
+import {
+  dailyLimitRefusalResult,
+  describeFailure,
+  isDailyLimitRefusal,
+  logToolUsage,
+  reserveDailyAllowance,
+  withUsageLog,
+} from './usage-log.js';
 import GraphClient from './graph-client.js';
 import AuthManager from './auth.js';
 import { api } from './generated/client.js';
@@ -15,7 +22,8 @@ import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { registerNotificationTools } from './notification-tools.js';
 import { registerFileTextTools } from './file-text-tools.js';
 import { registerFileTools } from './file-tools.js';
-import { registerReplyTrackingTools } from './reply-tracking-tools.js';
+import { registerReplyTrackingTools, trackingProperties } from './reply-tracking-tools.js';
+import { registerChatReplyTools } from './chat-reply-tools.js';
 import { registerMeetingTools } from './meeting-tools.js';
 import { registerInferenceTools } from './inference-tools.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
@@ -410,6 +418,618 @@ interface CallToolResult {
   [key: string]: unknown;
 }
 
+function errorResult(payload: Record<string, unknown>): CallToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: true };
+}
+
+// ---- tsq.28: request-body normalization for mail and calendar writes ---------
+//
+// Week to 2026-10-09: send-mail 400 RequestBodyRead ×6 (3 users),
+// create-calendar-event 400 UnableToDeserializePostBody ×5, create-draft-email ×1.
+// Both codes mean Graph could not bind the JSON to its type at all — a shape
+// error, not a value error. The shapes models get wrong are few and unambiguous:
+// recipients written as plain addresses instead of { emailAddress: { address } },
+// a send-mail body missing its `message` wrapper, and a body given as a string.
+// Each has exactly one correct reading, so they are fixed here rather than
+// returned as a 400 the model has to decode. Times are the exception: see
+// checkEventTimes.
+
+const MAIL_RECIPIENT_FIELDS = ['toRecipients', 'ccRecipients', 'bccRecipients', 'replyTo'];
+
+/** Tools whose body is a message, or carries one under `message`. */
+const MAIL_BODY_TOOLS = new Set([
+  'send-mail',
+  'send-shared-mailbox-mail',
+  'create-draft-email',
+  'reply-mail-message',
+  'reply-all-mail-message',
+  'forward-mail-message',
+  'create-reply-draft',
+  'create-reply-all-draft',
+  'create-forward-draft',
+]);
+
+/** sendMail is the one action whose body must be { message, saveToSentItems }. */
+const SEND_MAIL_TOOLS = new Set(['send-mail', 'send-shared-mailbox-mail']);
+
+const EVENT_BODY_TOOLS = new Set([
+  'create-calendar-event',
+  'create-specific-calendar-event',
+  'update-calendar-event',
+  'update-specific-calendar-event',
+]);
+
+type JsonObject = Record<string, unknown>;
+
+function isPlainObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `'a@x.com'`, `{ address, name }` or `{ emailAddress: 'a@x.com' }` → the
+ * `{ emailAddress: { address, name } }` Graph binds to. Anything else —
+ * including an already-correct entry — is returned untouched, so Graph stays
+ * the validator for shapes this does not recognise.
+ */
+function toEmailAddressEntry(entry: unknown): { value: unknown; changed: boolean } {
+  if (typeof entry === 'string') {
+    return { value: { emailAddress: { address: entry.trim() } }, changed: true };
+  }
+  if (!isPlainObject(entry)) return { value: entry, changed: false };
+  if (typeof entry.emailAddress === 'string') {
+    const { emailAddress, ...rest } = entry;
+    return { value: { ...rest, emailAddress: { address: emailAddress.trim() } }, changed: true };
+  }
+  if (entry.emailAddress === undefined && typeof entry.address === 'string') {
+    const { address, name, ...rest } = entry;
+    const emailAddress: JsonObject = { address: address.trim() };
+    if (typeof name === 'string') emailAddress.name = name;
+    return { value: { ...rest, emailAddress }, changed: true };
+  }
+  return { value: entry, changed: false };
+}
+
+/** A recipient field may also arrive as one string, or several joined by , or ; */
+function normalizeAddressList(value: unknown): { value: unknown; changed: boolean } {
+  let list: unknown[];
+  let changed = false;
+  if (typeof value === 'string') {
+    list = value
+      .split(/[;,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    changed = true;
+  } else if (Array.isArray(value)) {
+    list = value;
+  } else if (isPlainObject(value)) {
+    list = [value];
+    changed = true;
+  } else {
+    return { value, changed: false };
+  }
+  const mapped = list.map((entry) => {
+    const r = toEmailAddressEntry(entry);
+    changed ||= r.changed;
+    return r.value;
+  });
+  return { value: mapped, changed };
+}
+
+/** A body given as a bare string becomes an itemBody; HTML is sniffed, not assumed. */
+function normalizeItemBody(value: unknown): { value: unknown; changed: boolean } {
+  if (typeof value !== 'string') return { value, changed: false };
+  const contentType = /<[a-z][\s\S]*>/i.test(value) ? 'HTML' : 'Text';
+  return { value: { contentType, content: value }, changed: true };
+}
+
+/** Applies the recipient and body fixes to one message-shaped object, in place. */
+function normalizeMessageFields(message: JsonObject, fixes: string[], where: string): void {
+  for (const field of MAIL_RECIPIENT_FIELDS) {
+    if (message[field] === undefined) continue;
+    const r = normalizeAddressList(message[field]);
+    if (r.changed) {
+      message[field] = r.value;
+      fixes.push(`${where}${field} → [{ emailAddress: { address } }]`);
+    }
+  }
+  if (message.body !== undefined) {
+    const r = normalizeItemBody(message.body);
+    if (r.changed) {
+      message.body = r.value;
+      fixes.push(`${where}body string → { contentType, content }`);
+    }
+  }
+}
+
+/**
+ * Attendees take the same address fix plus a `type`. Only entries this rewrote
+ * get the default 'required' — what Outlook does with a name typed into To —
+ * so an attendee already in Graph's shape is sent exactly as the caller wrote it.
+ */
+function normalizeAttendees(value: unknown): { value: unknown; changed: boolean } {
+  const r = normalizeAddressList(value);
+  if (!r.changed || !Array.isArray(r.value)) return r;
+  const originals = Array.isArray(value) ? value : undefined;
+  const mapped = r.value.map((a, i) => {
+    const rewritten = !originals || toEmailAddressEntry(originals[i]).changed;
+    return rewritten && isPlainObject(a) && a.type === undefined ? { ...a, type: 'required' } : a;
+  });
+  return { value: mapped, changed: true };
+}
+
+/**
+ * Calendar start/end must be { dateTime, timeZone }. A bare string
+ * ('2026-10-14T15:00') fails with UnableToDeserializePostBody, and unlike the
+ * recipient shapes it has no single correct reading: the zone is missing, and
+ * guessing UTC or Eastern would put the meeting at the wrong hour on someone's
+ * calendar with nothing to show it happened. Refuse with the shape instead.
+ */
+function checkEventTimes(body: JsonObject, toolAlias: string): CallToolResult | undefined {
+  for (const field of ['start', 'end']) {
+    if (typeof body[field] !== 'string') continue;
+    logger.warn(`Refusing ${toolAlias}: '${field}' is a bare string, not { dateTime, timeZone }`);
+    return errorResult({
+      error: 'invalid_event_time',
+      tool: toolAlias,
+      field,
+      message:
+        `${field} must be an object { dateTime: '2026-09-08T14:00:00', timeZone: 'Eastern ` +
+        `Standard Time' }, not a bare string. The time zone has to be stated — use the ` +
+        "one the user gave, or their mailbox's (get-mailbox-settings → timeZone). Do not guess.",
+    });
+  }
+  return undefined;
+}
+
+/**
+ * Returns the body to send (possibly rewritten) or a refusal. Each rewrite is
+ * logged, like the existing parameter auto-corrections, so the weekly report
+ * can tell whether a fix is firing.
+ */
+/**
+ * Tools that can mark the message they create as awaiting a reply (tsq.28).
+ * 'message' = the body IS the message (a draft); 'wrapped' = the message sits
+ * under body.message (sendMail, and the reply/forward actions, whose optional
+ * `message` carries writable properties onto the reply they create).
+ */
+const TRACK_AT_SEND_TOOLS: Record<string, 'message' | 'wrapped'> = {
+  'send-mail': 'wrapped',
+  'create-draft-email': 'message',
+  'reply-mail-message': 'wrapped',
+  'reply-all-mail-message': 'wrapped',
+  'forward-mail-message': 'wrapped',
+  'create-reply-draft': 'wrapped',
+  'create-reply-all-draft': 'wrapped',
+  'create-forward-draft': 'wrapped',
+};
+
+/**
+ * Adds the reply-tracking marker to the message a send/draft tool creates.
+ * Scott, 2026-10-13: "if send-mail and the reply tools could take an option to
+ * track at send time, it would not depend on the agent remembering a second
+ * call." The marker rides inside the request, so the Sent Items copy is born
+ * tracked and list-awaiting-replies finds it like any track-reply'd message.
+ */
+export function applyTrackAtSend(
+  toolAlias: string,
+  body: unknown,
+  opts: { dueBy?: string; waitingOn?: string[] }
+): unknown {
+  const shape = TRACK_AT_SEND_TOOLS[toolAlias];
+  if (!shape) return body;
+  const props = trackingProperties(opts);
+  const base: JsonObject = isPlainObject(body) ? { ...body } : {};
+  const target: JsonObject =
+    shape === 'message'
+      ? base
+      : isPlainObject(base.message)
+        ? { ...(base.message as JsonObject) }
+        : {};
+  const existing = Array.isArray(target.singleValueExtendedProperties)
+    ? (target.singleValueExtendedProperties as JsonObject[]).filter(
+        (p) => !props.some((q) => q.id === p.id)
+      )
+    : [];
+  target.singleValueExtendedProperties = [...existing, ...props];
+  if (shape === 'wrapped') base.message = target;
+  logger.info(`${toolAlias}: tracking this message for a reply (track at send)`);
+  return base;
+}
+
+export function normalizeWriteBody(
+  toolAlias: string,
+  body: unknown
+): { body: unknown; error?: CallToolResult } {
+  if (!isPlainObject(body)) return { body };
+  const isMail = MAIL_BODY_TOOLS.has(toolAlias);
+  const isEvent = EVENT_BODY_TOOLS.has(toolAlias);
+  if (!isMail && !isEvent) return { body };
+
+  const fixes: string[] = [];
+  let out: JsonObject = { ...body };
+
+  if (isMail) {
+    // { subject, toRecipients, body } at the top level is a message that lost its
+    // wrapper. Only for sendMail, whose body is never itself a message; a draft's
+    // body IS the message, and reply/forward legitimately have top-level
+    // toRecipients beside `comment`.
+    if (
+      SEND_MAIL_TOOLS.has(toolAlias) &&
+      out.message === undefined &&
+      out.Message === undefined &&
+      ['subject', 'toRecipients', 'body'].some((k) => out[k] !== undefined)
+    ) {
+      const { saveToSentItems, ...message } = out;
+      out = { message, ...(saveToSentItems !== undefined ? { saveToSentItems } : {}) };
+      fixes.push('wrapped top-level message fields in { message }');
+    }
+    // reply/forward/createReply take recipients both beside `comment` and inside
+    // `message`; sendMail only inside it; a draft only at the top level.
+    normalizeMessageFields(out, fixes, '');
+    if (isPlainObject(out.message)) {
+      out.message = { ...out.message };
+      normalizeMessageFields(out.message as JsonObject, fixes, 'message.');
+    }
+  }
+
+  if (isEvent) {
+    const timeError = checkEventTimes(out, toolAlias);
+    if (timeError) return { body, error: timeError };
+    if (out.attendees !== undefined) {
+      const r = normalizeAttendees(out.attendees);
+      if (r.changed) {
+        out.attendees = r.value;
+        fixes.push("attendees → [{ emailAddress: { address }, type: 'required' }]");
+      }
+    }
+    if (out.body !== undefined) {
+      const r = normalizeItemBody(out.body);
+      if (r.changed) {
+        out.body = r.value;
+        fixes.push('body string → { contentType, content }');
+      }
+    }
+  }
+
+  if (fixes.length === 0) return { body };
+  logger.info(`Auto-corrected request body for ${toolAlias}: ${fixes.join('; ')}`);
+  return { body: out };
+}
+
+// ---- tsq.28: query options Graph rejects on specific collections -------------
+
+/** Graph's documented page-size maximum for /me/chats and /chats/{id}/messages. */
+const TEAMS_CHAT_MAX_TOP = 50;
+
+/**
+ * /chats/{id}/messages supports $orderby on exactly these two, both descending
+ * (learn.microsoft.com/graph/api/chat-list-messages, "Optional query parameters").
+ */
+const CHAT_MESSAGE_ORDERBY = new Set(['lastmodifieddatetime desc', 'createddatetime desc']);
+
+/** The filters list-online-meetings can actually run with delegated permissions. */
+const ONLINE_MEETING_FILTER = /\b(?:joinWebUrl|joinMeetingId|videoTeleconferenceId)\b/i;
+
+function clampTo(queryParams: Record<string, string>, max: number, toolAlias: string): void {
+  const raw = queryParams['$top'];
+  if (raw === undefined) return;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n > max) {
+    logger.info(`Clamping $top from ${n} to ${max} on ${toolAlias} (Graph maximum)`);
+    queryParams['$top'] = String(max);
+  }
+}
+
+/**
+ * The first property a $filter tests: `receivedDateTime ge …` → receivedDateTime,
+ * `contains(subject,'x')` → subject, `from/emailAddress/address eq …` →
+ * from/emailAddress/address, `toRecipients/any(…)` → toRecipients. Undefined when
+ * the expression opens with something this cannot read, so the caller leaves it
+ * alone rather than act on a guess.
+ */
+export function firstFilterProperty(filter: string): string | undefined {
+  let f = filter.trim();
+  for (;;) {
+    if (f.startsWith('(')) f = f.slice(1).trimStart();
+    else if (/^not\s/i.test(f)) f = f.slice(3).trimStart();
+    else break;
+  }
+  const fn = /^(?:contains|startswith|endswith)\s*\(\s*([A-Za-z][\w/]*)/i.exec(f);
+  if (fn) return fn[1];
+  const prop = /^([A-Za-z][\w/]*)/.exec(f);
+  return prop ? prop[1].replace(/\/(?:any|all)$/i, '') : undefined;
+}
+
+/**
+ * Rewrites query options that a collection is known to reject, returning a
+ * refusal when the request cannot succeed as asked, and the $orderby to apply
+ * client-side when one was removed but can still be honoured on the page.
+ */
+export function normalizeCollectionQuery(
+  toolAlias: string,
+  toolPath: string,
+  queryParams: Record<string, string>
+): { error?: CallToolResult; clientOrderby?: string } {
+  // list-chats 400 ×3 in the week to 2026-10-09. /me/chats rejects $orderby
+  // outright ("QueryOptions to order by lastUpdatedDateTime is not supported";
+  // the tool's tip already says not to send it) and caps $top at 50.
+  if (toolAlias === 'list-chats') {
+    if (queryParams['$orderby'] !== undefined) {
+      logger.info(`Dropped '$orderby' from ${toolAlias}: Graph does not support it on /me/chats`);
+      delete queryParams['$orderby'];
+    }
+    clampTo(queryParams, TEAMS_CHAT_MAX_TOP, toolAlias);
+  }
+
+  // list-chat-messages 400 ×2. Same $top ceiling; $orderby only in the two
+  // documented forms. Anything else is dropped — the default order is already
+  // newest first, which is what an $orderby here is nearly always asking for.
+  if (toolAlias === 'list-chat-messages') {
+    clampTo(queryParams, TEAMS_CHAT_MAX_TOP, toolAlias);
+    const orderby = queryParams['$orderby'];
+    if (
+      orderby !== undefined &&
+      !CHAT_MESSAGE_ORDERBY.has(orderby.trim().replace(/\s+/g, ' ').toLowerCase())
+    ) {
+      logger.info(
+        `Dropped '$orderby' from ${toolAlias}: Graph supports only lastModifiedDateTime desc or createdDateTime desc`
+      );
+      delete queryParams['$orderby'];
+    }
+  }
+
+  // list-mail-rules 400 ErrorInvalidUrlQueryFilter ×1. The messageRules
+  // collection takes no $filter, $search or $orderby; the whole set is small
+  // enough to fetch and read.
+  if (toolAlias === 'list-mail-rules') {
+    for (const key of ['$filter', '$search', '$orderby']) {
+      if (queryParams[key] !== undefined) {
+        logger.info(
+          `Dropped '${key}' from ${toolAlias}: Graph does not support it on messageRules`
+        );
+        delete queryParams[key];
+      }
+    }
+  }
+
+  // list-online-meetings 403 ×2. GET /me/onlineMeetings is not a listing: Graph
+  // only answers it with a $filter on the join URL (or the meeting/VTC id), and
+  // without one returns a 403 that reads like a permissions problem. Say what
+  // it actually needs.
+  if (toolAlias === 'list-online-meetings') {
+    const filter = queryParams['$filter'];
+    if (!filter || !ONLINE_MEETING_FILTER.test(filter)) {
+      logger.warn(`Refusing ${toolAlias}: no joinWebUrl filter`);
+      return {
+        error: errorResult({
+          error: 'join_url_required',
+          tool: toolAlias,
+          message:
+            'Graph cannot list online meetings; it can only look one up by its join link. Pass filter: "JoinWebUrl eq \'<url>\'". ' +
+            'Get the URL from the calendar event (get-calendar-event → onlineMeeting.joinUrl), ' +
+            'or convert a recap/short link with parse-teams-url first.',
+        }),
+      };
+    }
+  }
+
+  // list-mail-messages / list-mail-folder-messages 400 InefficientFilter ×2.
+  // Graph requires every $orderby property to appear in $filter, first and in
+  // the same order (learn.microsoft.com/graph/query-parameters, "Using $filter
+  // and $orderby in the same query"). When the leading property differs, the
+  // request cannot succeed; drop $orderby and sort the returned page instead,
+  // the same trade list-conversation-messages already makes. $search with
+  // $orderby is handled (dropped) in normalizeSearchQueryParam.
+  if (
+    isOutlookMailPath(toolPath) &&
+    queryParams['$filter'] !== undefined &&
+    queryParams['$orderby'] !== undefined &&
+    queryParams['$search'] === undefined
+  ) {
+    const orderby = queryParams['$orderby'];
+    const orderProp = orderby.split(',')[0].trim().split(/\s+/)[0];
+    const filterProp = firstFilterProperty(queryParams['$filter']);
+    if (filterProp && orderProp && filterProp.toLowerCase() !== orderProp.toLowerCase()) {
+      logger.info(
+        `Dropped '$orderby' from ${toolAlias}: '${orderProp}' is not the first property in $filter (InefficientFilter); sorting the page client-side`
+      );
+      delete queryParams['$orderby'];
+      // Only a single plain property can be sorted faithfully here.
+      if (/^[A-Za-z]\w*(\s+(asc|desc))?$/i.test(orderby.trim())) {
+        return { clientOrderby: orderby.trim() };
+      }
+    }
+  }
+
+  return {};
+}
+
+/**
+ * Sorts the `value` page of a successful list result by a single-property
+ * orderby and marks it, or returns the result untouched if it cannot. Shared by
+ * list-conversation-messages and the InefficientFilter fallback above.
+ */
+export function sortResultPage(
+  result: CallToolResult,
+  orderby: string,
+  note: string,
+  toolAlias: string
+): CallToolResult {
+  try {
+    const textBlock = result.content?.[0];
+    if (!textBlock || textBlock.type !== 'text' || typeof textBlock.text !== 'string') {
+      return result;
+    }
+    const parsed = JSON.parse(textBlock.text);
+    if (!parsed || !Array.isArray(parsed.value)) {
+      return result;
+    }
+
+    const orderbyParts = orderby.trim().split(/\s+/);
+    const field = orderbyParts[0];
+    const direction = (orderbyParts[1] || 'asc').toLowerCase();
+    const ascending = direction !== 'desc';
+
+    parsed.value.sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
+      const aVal = a?.[field];
+      const bVal = b?.[field];
+      if (aVal === undefined || aVal === null) return ascending ? 1 : -1;
+      if (bVal === undefined || bVal === null) return ascending ? -1 : 1;
+      if (aVal < bVal) return ascending ? -1 : 1;
+      if (aVal > bVal) return ascending ? 1 : -1;
+      return 0;
+    });
+
+    parsed._tsq_clientSorted = {
+      field,
+      direction: ascending ? 'asc' : 'desc',
+      note,
+    };
+
+    return {
+      ...result,
+      content: [{ ...textBlock, text: JSON.stringify(parsed) }],
+    };
+  } catch (err) {
+    logger.warn(`Failed to client-side sort ${toolAlias} result: ${(err as Error).message}`);
+    return result;
+  }
+}
+
+// ---- tsq.28: idempotent message delete ----------------------------------------
+
+/** A single Outlook message, in the mailbox or any folder — not its attachments. */
+const OUTLOOK_MESSAGE_ITEM_PATH =
+  /^\/(?:me|users\/[^/]+)(?:\/(?:mailFolders|childFolders)\/[^/]+)*\/messages\/[^/]+$/i;
+
+/**
+ * delete-mail-message 404 ErrorItemNotFound ×4 after tsq.27 (+29 before). A
+ * delete MOVES the message to Deleted Items and gives it a new id, so the old id
+ * 404s from then on; nearly every one of these was a second delete of a message
+ * the first call had already removed — sometimes our own 5xx retry, where the
+ * first attempt landed but its response did not. The user's intent ("this
+ * message gone from where it was") is met, so this reports success, flagged so
+ * the model can say so if the id was simply wrong.
+ */
+function alreadyDeletedResult(
+  tool: { alias: string; method: string; path: string },
+  response: { isError?: boolean; content: { text?: string }[] }
+): CallToolResult | undefined {
+  if (!response.isError || tool.method.toUpperCase() !== 'DELETE') return undefined;
+  if (!OUTLOOK_MESSAGE_ITEM_PATH.test(tool.path)) return undefined;
+  const failure = describeFailure(response);
+  if (failure.status !== 404 || failure.code !== 'ErrorItemNotFound') return undefined;
+  logger.info(`${tool.alias}: 404 ErrorItemNotFound treated as already deleted`);
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          alreadyDeleted: true,
+          note:
+            'No message with this id exists any more — it was already deleted or moved (a ' +
+            'delete moves it to Deleted Items under a new id). Nothing further to do. Do not ' +
+            'retry; if the user expected it to still be there, check Deleted Items.',
+        }),
+      },
+    ],
+  };
+}
+
+// ---- tsq.28: get-sharepoint-site-by-path ---------------------------------------
+
+/**
+ * Path segments that belong to a page or library inside a site, not to the site
+ * itself. A pasted browser URL ends in one of these more often than not.
+ */
+const SITE_PATH_STOP_SEGMENTS = new Set([
+  'sitepages',
+  'pages',
+  '_layouts',
+  '_api',
+  '_vti_bin',
+  'lists',
+  'forms',
+  'siteassets',
+  'shared documents',
+  'documents',
+]);
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/**
+ * Builds the Graph path for a site addressed by hostname and server-relative
+ * path: GET /sites/{hostname}:/{server-relative-path}
+ * (learn.microsoft.com/graph/api/site-getbypath). Each path segment is encoded
+ * on its own; the ':' after the hostname is the address syntax and must stay
+ * literal, which is why this is built here and not through the generic
+ * path-parameter encoder (it would turn the slashes into %2F).
+ *
+ * Replaces the generated `/sites/{site-id}/getByPath(path='{path}')` form,
+ * which failed every call in 30 days (≈18/18, 6 users): it needs a site id the
+ * caller does not have — the whole point of the tool is that they have a URL.
+ */
+export function resolveSiteByPath(params: Record<string, unknown>): {
+  path?: string;
+  error?: string;
+} {
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  let url = str(params.url);
+  let hostname = str(params.hostname);
+  let sitePath = str(params.path) || str(params.serverRelativePath);
+  // A full URL passed as `path`, or a hostname passed in the old site-id slot by
+  // a client still holding the pre-tsq.28 schema.
+  if (!url && /^https?:\/\//i.test(sitePath)) {
+    url = sitePath;
+    sitePath = '';
+  }
+  if (!hostname && /\.sharepoint\./i.test(str(params.siteId))) hostname = str(params.siteId);
+
+  if (url) {
+    let parsed: URL;
+    try {
+      parsed = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    } catch {
+      return { error: `Not a valid URL: ${url}` };
+    }
+    hostname = parsed.hostname;
+    sitePath = parsed.pathname;
+  }
+
+  if (!hostname) {
+    return {
+      error:
+        "Pass the site's full URL (url: 'https://contoso.sharepoint.com/sites/marketing'), or " +
+        'hostname plus path. To find a site by name instead, use search-sharepoint-sites.',
+    };
+  }
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(hostname)) {
+    return { error: `Not a valid SharePoint hostname: ${hostname}` };
+  }
+
+  const segments: string[] = [];
+  const raw = sitePath.split('/').filter(Boolean);
+  // Sharing links put a type marker first: /:f:/r/sites/x/… or /:w:/s/x/…
+  if (raw.length >= 2 && /^:[a-z]:$/i.test(raw[0]) && /^[a-z]$/i.test(raw[1])) raw.splice(0, 2);
+  for (const segment of raw) {
+    const decoded = decodeSegment(segment);
+    if (SITE_PATH_STOP_SEGMENTS.has(decoded.toLowerCase()) || /\.aspx$/i.test(decoded)) break;
+    segments.push(encodeURIComponent(decoded));
+  }
+
+  // No path left means the root site, which Graph addresses by hostname alone.
+  return {
+    path: segments.length ? `/sites/${hostname}:/${segments.join('/')}` : `/sites/${hostname}`,
+  };
+}
+
 /**
  * Thin wrapper around the tool execution that records a structured usage record
  * (which tool, by whom, success/error) for periodic tiered-rollout reporting.
@@ -422,13 +1042,29 @@ async function executeGraphTool(
   params: Record<string, unknown>,
   authManager?: AuthManager
 ): Promise<CallToolResult> {
+  // Per-user daily ceiling on deletes and sends (tsq.28, off unless configured).
+  // Checked here so every route to a limited tool — direct, execute-tool in
+  // discovery mode — passes the same gate, and the refusal is in the usage log.
+  const allowance = reserveDailyAllowance(tool.alias);
+  if (isDailyLimitRefusal(allowance)) {
+    logger.warn(
+      `Refusing ${tool.alias}: daily ${allowance.kind} limit of ${allowance.limit} reached`
+    );
+    const refusal = dailyLimitRefusalResult(tool.alias, allowance);
+    logToolUsage(tool.alias, 'error', describeFailure(refusal));
+    return refusal;
+  }
+
   let result: CallToolResult;
   try {
     result = await executeGraphToolImpl(tool, config, graphClient, params, authManager);
   } catch (error) {
+    allowance?.refund();
     logToolUsage(tool.alias, 'error', describeFailure(error));
     throw error;
   }
+  // A failed action did not happen, so it does not use up the day.
+  if (result.isError) allowance?.refund();
   logToolUsage(
     tool.alias,
     result.isError ? 'error' : 'success',
@@ -446,6 +1082,20 @@ async function executeGraphToolImpl(
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
   try {
+    // tsq.28: the generated path for this tool cannot work (see resolveSiteByPath);
+    // swap in the hostname:/path form and drop the addressing params so the
+    // generic loop below does not try to place them.
+    if (tool.alias === 'get-sharepoint-site-by-path') {
+      const resolved = resolveSiteByPath(params);
+      if (!resolved.path) {
+        return errorResult({ error: 'invalid_site_address', message: resolved.error });
+      }
+      logger.info(`${tool.alias}: resolved to ${resolved.path}`);
+      const addressing = new Set(['url', 'hostname', 'path', 'serverRelativePath', 'siteId']);
+      tool = { ...tool, path: resolved.path, parameters: [] };
+      params = Object.fromEntries(Object.entries(params).filter(([k]) => !addressing.has(k)));
+    }
+
     // Resolve account-specific token if `account` parameter is provided (or auto-resolve for single account).
     // Skip in OAuth/HTTP mode — let the request context drive token selection via GraphClient.
     // Also skip when a request-context token exists (HTTP/OAuth flow where token comes from middleware).
@@ -608,6 +1258,21 @@ async function executeGraphToolImpl(
     clampTopQueryParam(queryParams);
     const searchError = normalizeSearchQueryParam(queryParams, tool.path, tool.alias);
     if (searchError) return searchError;
+    const collectionQuery = normalizeCollectionQuery(tool.alias, tool.path, queryParams);
+    if (collectionQuery.error) return collectionQuery.error;
+
+    const normalizedBody = normalizeWriteBody(tool.alias, body);
+    if (normalizedBody.error) return normalizedBody.error;
+    body = normalizedBody.body;
+
+    if (params.trackReply === true && TRACK_AT_SEND_TOOLS[tool.alias]) {
+      body = applyTrackAtSend(tool.alias, body, {
+        dueBy: typeof params.trackDueBy === 'string' ? params.trackDueBy : undefined,
+        waitingOn: Array.isArray(params.trackWaitingOn)
+          ? (params.trackWaitingOn as unknown[]).filter((v): v is string => typeof v === 'string')
+          : undefined,
+      });
+    }
 
     const preferValues: string[] = [];
 
@@ -840,17 +1505,29 @@ async function executeGraphToolImpl(
       }
     }
 
+    const alreadyDeleted = alreadyDeletedResult(tool, response);
+    if (alreadyDeleted) return alreadyDeleted;
+
     // Convert McpResponse to CallToolResult with the correct structure
     const content: ContentItem[] = response.content.map((item) => ({
       type: 'text' as const,
       text: item.text,
     }));
 
-    return {
+    const converted: CallToolResult = {
       content,
       _meta: response._meta,
       isError: response.isError,
     };
+    if (collectionQuery.clientOrderby && !converted.isError) {
+      return sortResultPage(
+        converted,
+        collectionQuery.clientOrderby,
+        'Sorted client-side by the MCP server because Graph rejects this $orderby with this $filter (InefficientFilter). Only the returned page is sorted; pass fetchAllPages for a complete ordering.',
+        tool.alias
+      );
+    }
+    return converted;
   } catch (error) {
     logger.error(`Error in tool ${tool.alias}: ${(error as Error).message}`);
     return {
@@ -970,6 +1647,27 @@ export function registerGraphTools(
       }
     }
 
+    // tsq.28: the generated schema asks for a site id plus a path, and the site id
+    // is exactly what a caller of this tool does not have. The executor builds the
+    // real address from a URL (or hostname + path) — see resolveSiteByPath.
+    if (tool.alias === 'get-sharepoint-site-by-path') {
+      delete paramSchema['siteId'];
+      paramSchema['url'] = z
+        .string()
+        .describe(
+          'Full site URL, e.g. https://contoso.sharepoint.com/sites/marketing. A page or library URL inside the site works too.'
+        )
+        .optional();
+      paramSchema['hostname'] = z
+        .string()
+        .describe('Instead of url: the SharePoint hostname, e.g. contoso.sharepoint.com.')
+        .optional();
+      paramSchema['path'] = z
+        .string()
+        .describe('With hostname: the server-relative site path, e.g. /sites/marketing.')
+        .optional();
+    }
+
     if (tool.method.toUpperCase() === 'GET' && tool.path.includes('/')) {
       paramSchema['fetchAllPages'] = z
         .boolean()
@@ -1049,6 +1747,25 @@ export function registerGraphTools(
       .boolean()
       .describe('Return only success or failure, not the body.')
       .optional();
+
+    // Track at send (tsq.28): available on every tool that creates a message.
+    if (TRACK_AT_SEND_TOOLS[tool.alias]) {
+      paramSchema['trackReply'] = z
+        .boolean()
+        .describe(
+          'Track this message for a reply, in the same call: list-awaiting-replies will report ' +
+            'it in any later conversation. Use whenever the user expects an answer.'
+        )
+        .optional();
+      paramSchema['trackDueBy'] = z
+        .string()
+        .describe('With trackReply: ISO date after which it is reported overdue.')
+        .optional();
+      paramSchema['trackWaitingOn'] = z
+        .array(z.string())
+        .describe("With trackReply: only these addresses' replies count. Default: anyone but you.")
+        .optional();
+    }
 
     // Add timezone parameter for calendar endpoints that support it
     if (endpointConfig?.supportsTimezone) {
@@ -1291,52 +2008,12 @@ export function registerGraphTools(
             return result;
           }
 
-          try {
-            const textBlock = result.content?.[0];
-            if (!textBlock || textBlock.type !== 'text' || typeof textBlock.text !== 'string') {
-              return result;
-            }
-            const parsed = JSON.parse(textBlock.text);
-            if (!parsed || !Array.isArray(parsed.value)) {
-              return result;
-            }
-
-            const orderbyParts = requestedOrderby.trim().split(/\s+/);
-            const field = orderbyParts[0];
-            const direction = (orderbyParts[1] || 'asc').toLowerCase();
-            const ascending = direction !== 'desc';
-
-            parsed.value.sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
-              const aVal = a?.[field];
-              const bVal = b?.[field];
-              if (aVal === undefined || aVal === null) return ascending ? 1 : -1;
-              if (bVal === undefined || bVal === null) return ascending ? -1 : 1;
-              if (aVal < bVal) return ascending ? -1 : 1;
-              if (aVal > bVal) return ascending ? 1 : -1;
-              return 0;
-            });
-
-            parsed._tsq_clientSorted = {
-              field,
-              direction: ascending ? 'asc' : 'desc',
-              note: 'Sorted client-side by the MCP server because Graph rejects this $filter + $orderby combination with InefficientFilter, even in advanced query mode.',
-            };
-
-            return {
-              ...result,
-              content: [
-                {
-                  ...textBlock,
-                  text: JSON.stringify(parsed),
-                },
-              ],
-            };
-          } catch (err) {
-            logger.warn(
-              `Failed to client-side sort list-conversation-messages result: ${(err as Error).message}`
-            );
-            return result;
-          }
+          return sortResultPage(
+            result,
+            requestedOrderby,
+            'Sorted client-side by the MCP server because Graph rejects this $filter + $orderby combination with InefficientFilter, even in advanced query mode.',
+            'list-conversation-messages'
+          );
         }
       );
       registeredNames.push('list-conversation-messages');
@@ -1882,6 +2559,27 @@ export function registerGraphTools(
   // it, and TSQ holds nothing. Replaces the need for a live subscription that
   // watch-for-reply has, which only works while its conversation stays open.
   registerReplyTrackingTools(server, graphClient, {
+    isToolEnabled,
+    readOnly,
+    push: (name: string) => {
+      registeredNames.push(name);
+      registeredCount++;
+    },
+    fail: (name: string, error: Error) => {
+      logger.error(`Failed to register tool ${name}: ${error.message}`);
+      failedCount++;
+    },
+    skip: (name: string) => {
+      logger.info(`Skipping write tool ${name} - read-only mode`);
+      skippedCount++;
+    },
+  });
+
+  // ---- Teams replies (tsq.28) --------------------------------------------------
+  // Scott, 2026-10-14: six people had answered his agents' Teams chats in a week
+  // with nobody noticing. Chat messages cannot carry the reply-tracking marker,
+  // so this is computed live from the chats themselves and stores nothing.
+  registerChatReplyTools(server, graphClient, {
     isToolEnabled,
     readOnly,
     push: (name: string) => {

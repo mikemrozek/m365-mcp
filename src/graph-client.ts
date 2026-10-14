@@ -88,6 +88,63 @@ export function describeRequestForLog(options: GraphRequestOptions = {}): string
   return parts.join(' ');
 }
 
+/**
+ * Retry policy for the shared Graph request path (tsq.28).
+ *
+ * Week to 2026-10-09, after the tsq.27 deploy: 429 ApplicationThrottled on
+ * delete-mail-message ×6, list-mail-child-folders ×14 and list-mail-messages ×5,
+ * plus 500/502/503/504 on delete-mail-message ×7 and 502/504 on
+ * list-mail-folder-messages. Every one of those reached the user as a failure
+ * the model then retried by hand, often immediately, which is what throttling
+ * punishes. One server-side retry absorbs the burst without the model noticing.
+ *
+ * The two cases differ on purpose:
+ *   - 429 means Graph refused the request without processing it, so retrying is
+ *     safe for every method, including a send.
+ *   - A 5xx (or a dropped connection) says nothing about whether the request was
+ *     processed. A POST that timed out at the gateway may already have sent the
+ *     email; replaying it sends it twice. Only GET and DELETE are retried — a
+ *     repeated GET is harmless, and a repeated DELETE either deletes or reports
+ *     404, which delete-mail-message reads as "already deleted" (see graph-tools).
+ *
+ * `sleep` is on an object so tests can stub it rather than waiting real seconds.
+ */
+export const retryPolicy = {
+  /** Longest Retry-After we honour. Beyond it, retrying once is pointless and slow. */
+  maxRetryAfterMs: 30_000,
+  /** Graph usually sends Retry-After on a 429; when it does not, wait this long. */
+  defaultRetryAfterMs: 2_000,
+  /** Pause before replaying an idempotent request after a 5xx or network error. */
+  transientDelayMs: 1_000,
+  sleep: (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
+
+/**
+ * Retry-After is either delta-seconds or an HTTP-date (RFC 9110 §10.2.3). Graph
+ * sends seconds in practice; the date form is handled so a proxy in the path
+ * cannot turn it into NaN. Returns undefined when absent or unparseable.
+ */
+export function parseRetryAfterMs(
+  header: string | null | undefined,
+  now = Date.now()
+): number | undefined {
+  if (header === null || header === undefined) return undefined;
+  const trimmed = header.trim();
+  if (trimmed === '') return undefined;
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(Number(trimmed) * 1000);
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, at - now);
+}
+
+/** Path without the query string, so a retry log line cannot carry search terms. */
+function pathForLog(endpoint: string): string {
+  const q = endpoint.indexOf('?');
+  return q === -1 ? endpoint : endpoint.slice(0, q);
+}
+
 interface ContentItem {
   type: 'text';
   text: string;
@@ -128,7 +185,7 @@ class GraphClient {
     }
 
     try {
-      const response = await this.performRequest(endpoint, accessToken, options);
+      const response = await this.sendWithRetry(endpoint, accessToken, options);
 
       if (response.status === 403) {
         const errorText = await response.text();
@@ -198,6 +255,59 @@ class GraphClient {
       logger.error('Microsoft Graph API request failed:', error);
       throw error;
     }
+  }
+
+  /**
+   * performRequest plus at most one retry, per retryPolicy above. Exactly one:
+   * a second failure goes back to the caller, so a genuinely degraded Graph
+   * surfaces as an error within seconds instead of hanging the tool call.
+   */
+  private async sendWithRetry(
+    endpoint: string,
+    accessToken: string,
+    options: GraphRequestOptions
+  ): Promise<Response> {
+    const method = (options.method || 'GET').toUpperCase();
+    const idempotent = method === 'GET' || method === 'DELETE';
+    const where = `${method} ${pathForLog(endpoint)}`;
+
+    let response: Response;
+    try {
+      response = await this.performRequest(endpoint, accessToken, options);
+    } catch (error) {
+      // A network error on a GET is safe to replay. On anything else the
+      // request may have landed before the connection dropped, so it is not.
+      if (method !== 'GET') throw error;
+      logger.warn(
+        `[GRAPH CLIENT] Network error on ${where}; retrying once: ${(error as Error).message}`
+      );
+      await retryPolicy.sleep(retryPolicy.transientDelayMs);
+      return this.performRequest(endpoint, accessToken, options);
+    }
+
+    let waitMs: number | undefined;
+    if (response.status === 429) {
+      const retryAfter = parseRetryAfterMs(response.headers?.get?.('retry-after'));
+      if (retryAfter !== undefined && retryAfter > retryPolicy.maxRetryAfterMs) {
+        // Graph asked for a longer pause than a tool call can sit through; one
+        // early retry would only be throttled again. Hand the 429 back as-is.
+        logger.warn(
+          `[GRAPH CLIENT] 429 on ${where} with Retry-After ${retryAfter}ms; over the ` +
+            `${retryPolicy.maxRetryAfterMs}ms cap, not retrying`
+        );
+        return response;
+      }
+      waitMs = retryAfter ?? retryPolicy.defaultRetryAfterMs;
+    } else if (idempotent && TRANSIENT_STATUSES.has(response.status)) {
+      waitMs = retryPolicy.transientDelayMs;
+    }
+    if (waitMs === undefined) return response;
+
+    logger.warn(`[GRAPH CLIENT] ${response.status} on ${where}; retrying once after ${waitMs}ms`);
+    // Drain the first body so its connection goes back to the pool.
+    await response.text().catch(() => undefined);
+    await retryPolicy.sleep(waitMs);
+    return this.performRequest(endpoint, accessToken, options);
   }
 
   private async performRequest(
@@ -290,7 +400,7 @@ class GraphClient {
     if (!accessToken) {
       throw new Error('No access token available');
     }
-    const response = await this.performRequest(endpoint, accessToken, options);
+    const response = await this.sendWithRetry(endpoint, accessToken, options);
     if (!response.ok) {
       throw new Error(
         `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
